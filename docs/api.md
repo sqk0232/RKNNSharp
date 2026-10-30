@@ -64,7 +64,7 @@ using var model = new RknnModel(modelPath, NpuCoreMask.Core0,
 
 `PreferFastInt8` 只影响 `Run`/`RunInto`. 原生逐head核验标准NCHW、连续affine INT8、shape/元素数/size一致、合法zero point和有限正scale后可用快速仿射转换; 不满足条件的head仍由SDK转换. 这是一项允许快速转换的请求, 不保证所有head均走快速路径. `Detect`仍使用原有INT8路径, 快照、调用方slice/Pin、异常和会话并发契约不变.
 
-快速模式可能因浮点舍入而与SDK输出不同, 包括SDK在量化zero point附近的非零残留; 不保证逐bit一致, 不保证任意置信度、分数排序或NMS IoU边界处所有检测决策相同. 本次固定模型/输入的误差记录不能作为任意模型/scale的通用上界, 不宣称普遍只差几个ULP. 对精度敏感的模型与阈值应分别验证; 需要SDK浮点参考时保留 `SdkExact` 会话. 新native保留ABI2并增加可选配置导出; 旧native继续支持默认模式, 显式快速请求缺少导出时构造抛 `NotSupportedException` 并释放已创建会话, 不会静默改回默认.
+快速模式可能因浮点舍入而与SDK输出不同, 包括SDK在量化zero point附近的非零残留; 不保证逐bit一致, 不保证任意置信度、分数排序或NMS IoU边界处所有检测决策相同. 已测固定模型/输入的误差记录不能作为任意模型/scale的通用上界, 不宣称普遍只差几个ULP. 对精度敏感的模型与阈值应分别验证; 需要SDK浮点参考时保留 `SdkExact` 会话. 新native保留ABI2并增加可选配置导出; 旧native继续支持默认模式, 显式快速请求缺少导出时构造抛 `NotSupportedException` 并释放已创建会话, 不会静默改回默认.
 
 `model.Detect(frame, profile)` 使用原生预分配的标准 INT8 输出, 在会话锁和 SafeHandle 借用期内完成 sigmoid 查表/NMS, 只返回独立检测结果, 不每帧分配 float tensor. 三个 head 各用自己的量化参数; signed INT8 不含 NaN/Inf, 查表构建时验证全部可能的反量化值. `profile.Decode` 的浮点输出 finite 校验仍完整保留. 两条路径使用相同阈值和几何公式, runtime 浮点舍入差使其不保证 bit exact; 需要浮点基线时用默认SDK会话调用 `var raw = model.Run(frame); profile.Decode(raw.Outputs, raw.Transform);`.
 
@@ -72,7 +72,7 @@ using var model = new RknnModel(modelPath, NpuCoreMask.Core0,
 
 原有构造函数签名保留. 需要加载前内容预检时使用 `new RknnModel(modelPath, NpuCoreMask.Auto, expectedModelSha256)`: 第三参为null时不读hash, 否则须为64位十六进制SHA256, 大小写均接受; 不匹配会在创建native会话前失败. 这是一次启动期预检, 不是签名或原子加载, 不证明anchors、类别或精度.
 
-RKNN三尺度DFL检测使用新增的 `YoloDetectionConfig` / `YoloDetectionProfile`, 在 `RunInto` 后解码明确的输出契约. 本轮仅已板验指定的YOLOv8n RKNN模型; YOLO11未板验, 不计入兼容验收. 不按型号猜测导出格式; 配置示例、输入输出契约与不支持项见 [YOLO检测兼容层](yolo-detection.md). 现有YOLOv5 `Detect` 路径保持不变.
+RKNN三尺度DFL检测使用新增的 `YoloDetectionConfig` / `YoloDetectionProfile`, 在 `RunInto` 后解码明确的输出契约. 已有板端验证仅覆盖指定的YOLOv8n RKNN模型; YOLO11未板验, 不计入兼容验收. 不按型号猜测导出格式; 配置示例、输入输出契约与不支持项见 [YOLO检测兼容层](yolo-detection.md). 现有YOLOv5 `Detect` 路径保持不变.
 
 新解码器对量化同分NMS采用稳定选择顺序, 可能与官方NumPy原同分排序选中不同坐标框; 不宣称两者所有输出全等价. 独立参考核验明确区分原官方和固定稳定tie策略. 默认SdkExact的Run/RunInto仍保留SDK浮点参考; 显式PreferFastInt8的舍入与边界限制见上文.
 
@@ -81,7 +81,7 @@ RKNN三尺度DFL检测使用新增的 `YoloDetectionConfig` / `YoloDetectionProf
 - 运行目标为 Linux ARM64 RK3588; .NET构建主机可使用Windows或Linux, SDK版本由 `global.json` 指定, 目标框架 `net10.0`, 无第三方托管运行依赖. 核心原生运行需要板端 RKNN/RGA 驱动和匹配版本库; GStreamer/MPP 仅为采集示例依赖, 详见 [硬件约束](hardware.md).
 - DMA 帧仅支持线性、单 FD、offset=0 的 NV12/RGB888/RGBA8888. `RowStrideBytes` 为字节, NV12 UV 起始于 `RowStrideBytes*HeightStride`. 不支持 AFBC、分离 FD、任意平面 offset 或 CPU byte[] 输入. 描述符验证不证明 FD 的真实有效性; 不支持时抛异常, 无软件回退.
 - 借用的 `DmaFrame` 不拥有 FD. 调用方负责生产者同步和直到返回前的存活/排他访问. 保存或复制描述符不延长 sample 生命周期. `DmaImage` 用 `SafeHandle` 管理 owned DMA; `WithFrame` 仅允许同步借用.
-- NV12 色域必须明确配置, 默认 `Unspecified` 会被拒绝. 示例可使用 caps 声明或显式 override; 相机 SPS VUI 证明 full range, 未声明色彩矩阵, 本次 BT.601 full 的矩阵部分仅为显式测试假设, 尚无相机色彩基准验证.
+- NV12 色域必须明确配置, 默认 `Unspecified` 会被拒绝. 示例可使用 caps 声明或显式 override; 相机 SPS VUI 证明 full range, 未声明色彩矩阵, 历史测试中 BT.601 full 的矩阵部分仅为显式测试假设, 尚无相机色彩基准验证.
 - 当前原生输入只接受静态 NHWC RGB INT8、zeroPoint=-128、scale精确等于`float(1/255)`; RGA 生成 signed input, `pass_through=1`. 不支持任意模型归一化或动态 shape.
 - `Run`和`Detect`核对native返回的整数resize、居中padding、静态模型目标尺寸与实际两轴scale, 合同不一致时失败. 有效返回值原样使用; 公开`LetterboxTransform`仍允许独立两轴缩放和一般padding.
 - 推理 resize/CSC 要求 RK3588 RGA3, 通过逐操作参数允许两个已验证等价的 RGA3 核并显式使用双线性插值. 缺少或不兼容 RGA3 时失败, 不回退到 RGA2 resize 或 CPU. INT8 bitwise ROP 仍使用独立的硬件操作.

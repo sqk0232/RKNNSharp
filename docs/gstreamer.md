@@ -19,13 +19,13 @@ cmake -S samples/GStreamerNative -B "$GST_BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$GST_BUILD_DIR" --target rknnsharp_gst rknnsharp_gst_probe --parallel 2
 ```
 
-板端默认单配置构建生成`$GST_BUILD_DIR/librknnsharp_gst.so`和`$GST_BUILD_DIR/rknnsharp_gst_probe`. 前者放入自己C#应用发布目录; probe仅用于有限采集检查. 它不需要RKNN模型或推理库, 但完整C#示例还需从`native/`生成核心so, 见[部署流程](integration.md#从源码使用). 发布目录、SDK和动态库搜索路径由调用者配置, 不依赖私有任务目录中的已有二进制.
+板端默认单配置构建生成`$GST_BUILD_DIR/librknnsharp_gst.so`和`$GST_BUILD_DIR/rknnsharp_gst_probe`. 前者放入自己C#应用发布目录; probe仅用于有限采集检查. 它不需要RKNN模型或推理库, 但完整C#示例还需从`native/`生成核心so, 见[部署流程](integration.md#从源码使用). 发布目录、SDK和动态库搜索路径由调用者配置, 不依赖预先编译的本机二进制.
 
 首次可用自备带时间戳的MP4做有限检查, 设置`VIDEO_PATH`与匹配的`CODEC`后运行`"$GST_BUILD_DIR/rknnsharp_gst_probe" file "$VIDEO_PATH" "$CODEC" 5`. RTSP时C#示例可直接使用调用者自备的`RTSP_URL_FILE`, 内容由进程内部读取. 若使用native probe, RTSP参数是已配置的环境变量名, 不是URI; 不把带凭证URI写到命令行、日志或仓库.
 
 ## 本地验收记录说明
 
-以下是2026-10-29的板端版本、布局与历史实验记录. 私有相机URL文件、600帧MP4、任务目录和已编译so不随源码提供, 不是首次运行的必要输入. 读者应使用自己的来源并按以上步骤构建; 历史hash不代表可以从公开Release取得这些二进制. 文中未上传的日志仅说明当时验收, 不作为源码使用依赖.
+以下是2026-10-29的板端版本、布局与历史实验记录. 私有相机URL文件、600帧MP4和已编译so不随源码提供, 不是首次运行的必要输入. 读者应使用自己的来源并按以上步骤构建; 历史hash不代表可以从公开Release取得这些二进制. 文中未上传的日志仅说明当时验收, 不作为源码使用依赖.
 
 ## 已验证环境
 
@@ -108,7 +108,7 @@ fixture 生成命令（测试图在生成阶段由 videotestsrc 创建；应用�
 timeout 15s gst-launch-1.0 -e videotestsrc num-buffers=30 ! video/x-raw,format=NV12,width=640,height=480,framerate=10/1 ! mpph264enc gop=10 ! h264parse ! mp4mux ! filesink location="$GENERATED_VIDEO_PATH"
 ```
 
-用户授权的真实配置 `$RTSP_URL_FILE` 是单行完整 URI。只在远端进程内读取并直接调用 API，或把它放入子进程环境后运行 `probe rtsp ENVIRONMENT_VARIABLE_NAME h264 30`。不要把 URI 作为进程命令行、pipeline 字符串、日志或本地文件；不下载/打印/修改原文件。probe 的 RTSP 参数是环境变量名。真实凭证更新后已成功验证；早期 401 是旧凭证，不应自动反复认证。临时凭证文件已清理。原文件权限由用户管理，本任务没有修改。
+`RTSP_URL_FILE` 是由使用方准备的单行完整 URI 文件。采集 API 在进程内读取它；使用 probe 时，先在进程环境中设置 URI，再传环境变量名运行 `probe rtsp ENVIRONMENT_VARIABLE_NAME h264 30`。不要将 URI 直接作为命令参数、pipeline 字符串或日志输出。私有文件权限由使用方管理。
 
 API bus error 只返回来源元素、domain、code 和识别出的 401，不返回原始错误/debug 文本。外层测试也要关闭含 URL 的调试日志并脱敏输出，避免外部插件直接打印凭证。
 
@@ -144,7 +144,7 @@ adapter 不把 capture 限制为“全局只能有一帧在途”。`rkgst_pull`
 
 媒体 PTS 与本机观察时间分别记录，不能用主机时钟替代媒体时间戳。
 
-## 已有日志的实际交付速率
+## 历史短窗口输入速率
 
 从历史真实 RTSP 测试的 30 个已交付帧计算 29 个间隔：
 
@@ -218,7 +218,7 @@ int rkgst_open_file_unpaced(const char *path, const char *codec,
 
 该入口仍走 qtdemux/parser/MPP/NV12/DMABUF 严格检查，保持原始分辨率与 PTS；唯一策略差异是 `appsink sync=false drop=false max-buffers=1`。这是明确的有限吞吐基准模式，不测播放时钟同步或端到端延迟；无 clock pacing、有界背压且不丢 appsink 帧。原有 RTSP 与 `rkgst_open_file` 的同步/drop 默认行为保持兼容。
 
-单一 producer 在取得总在途许可后 pull，为每次成功取帧生成独立 `SourceIndex`，与原始 PTS 分别保存。每个结果保留相同来源索引与 owner；不得用 PTS 或完成顺序去匹配其他帧。本次文件入口不自动循环：EOF 后停止 producer、排空结果、等待所有 worker/硬件操作完成、归还所有 sample，再 close。比较不同 worker 数时先单独借首帧完成相同暖机并归还，再重新打开同一文件，使用相同索引范围和相同绘框路径。不能通过降分辨率、跳过复制/绘框、重复处理固定 DMA 或丢掉慢帧提高“完整”吞吐。
+单一 producer 在取得总在途许可后 pull，为每次成功取帧生成独立 `SourceIndex`，与原始 PTS 分别保存。每个结果保留相同来源索引与 owner；不得用 PTS 或完成顺序去匹配其他帧。此文件入口不自动循环：EOF 后停止 producer、排空结果、等待所有 worker/硬件操作完成、归还所有 sample，再 close。比较不同 worker 数时先单独借首帧完成相同暖机并归还，再重新打开同一文件，使用相同索引范围和相同绘框路径。不能通过降分辨率、跳过复制/绘框、重复处理固定 DMA 或丢掉慢帧提高“完整”吞吐。
 
 有限 VPU-only 验证命令：
 

@@ -37,7 +37,7 @@ MODEL (--file MP4|--file-unpaced MP4|--rtsp-file PRIVATE_URL_FILE)
 | workers | 0 自动，或 1/3/6；不能超过 sessionsPerCore×3 |
 | inFlight | 0 自动为 workers×2，或 workers..24 |
 
-`--file-unpaced` 只用于 pipeline，frames 必须与自备有限文件总帧数相符。它衡量解码、推理和有序消费的吞吐，不能代替相机网络延迟。诊断模式还会复制到独占 DMA 图像绘框并检查生命周期，不属于最小应用调用开销。详细性能口径见[整合历史记录](../../docs/integration.md#本地验收历史)。
+`--file-unpaced` 只用于 pipeline，frames 必须与自备有限文件总帧数相符。它衡量解码、推理和有序消费的吞吐，不能代替相机网络延迟。诊断模式还会复制到独占 DMA 图像绘框并检查生命周期，不属于最小应用调用开销。详细性能口径见[测试数据](../../README.md#测试数据)。
 
 特殊诊断入口：
 
@@ -54,4 +54,4 @@ MODEL --contract-compare FIXTURE BASELINE_DLL [iterations=12] [EXPECTED_SHA256]
 
 退出码：0 为成功（`--help` 也为0）；1 为运行失败或参数错误；2 为缺少基本调用参数。通用错误仅输出异常类型，避免意外记录凭据；不输出完整参数、私有文件内容或源 URL。排错时先核对输入和[部署前置条件](../../docs/integration.md#从源码使用)，不要以开启软件解码回退规避不支持的布局。
 
-本次文档和入口修改只做主机验证；没有执行新一轮板端推理、媒体采集、精度或性能验证。
+板端性能和兼容范围见测试数据；主机上的构建与托管测试不能代替对自备输入的硬件验证。
