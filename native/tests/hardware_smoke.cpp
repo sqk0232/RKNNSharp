@@ -31,13 +31,16 @@ int main(int argc,char** argv){
     // Synthetic source pixels are generated exclusively by RGA hardware fill.
     rknn_context ctx=0;if(rknn_init(&ctx,argv[1],0,0,nullptr))return 1;
     unsigned w=in.dims[2],h=in.dims[1],stride=in.width_stride?in.width_stride:w;
-    auto* mem=rknn_create_mem(ctx,stride*h*3);if(!mem)return 1;
-    auto handle=importbuffer_fd(mem->fd,int(mem->size));if(!handle)return 1;
+    // RKNN allocations do not guarantee the DMA32 storage needed by RGA fill
+    // on this BSP. Use the production allocator for both hardware fixtures.
+    rks_image* source_owner=nullptr;rks_frame frame{};
+    if(rks_allocate_image(w,h,RKS_RGB888,&source_owner,&frame))return fail("source allocation");
+    if(frame.row_stride_bytes!=stride*3||frame.height_stride!=h)return 1;
+    auto handle=importbuffer_fd(frame.fd,int(frame.size_bytes));if(!handle)return 1;
     auto image=wrapbuffer_handle(handle,w,h,RK_FORMAT_RGB_888,stride,h);
     if(imfill(image,{0,0,int(w),int(h)},0xff727272,1)!=IM_STATUS_SUCCESS)return 1;
-    rks_frame frame{mem->fd,w,h,RKS_RGB888,stride*3,h,mem->size,0,0,0};
     rks_run_info info{};
-    for(int i=0;i<4;i++){if(rks_run(s,&frame,&info))return fail("run");std::printf("run%d src_fd=%d bound_input_fd=%d stride=%u pre=%.3f npu=%.3f outputs=%.3f ms\n",i,mem->fd,info.input_dma_fd,info.input_stride_bytes,info.preprocess_ms,info.inference_ms,info.outputs_ms);}
+    for(int i=0;i<4;i++){if(rks_run(s,&frame,&info))return fail("run");std::printf("run%d src_fd=%d bound_input_fd=%d stride=%u pre=%.3f npu=%.3f outputs=%.3f ms\n",i,frame.fd,info.input_dma_fd,info.input_stride_bytes,info.preprocess_ms,info.inference_ms,info.outputs_ms);}
     std::vector<std::vector<float>> constant_float(outputs);
     for(unsigned i=0;i<outputs;i++){
         rks_tensor a{};rks_get_tensor(s,1,i,&a);std::vector<float> data(a.element_count);
@@ -80,7 +83,14 @@ int main(int argc,char** argv){
     // Independent reference: RGA directly fills the expected signed RGB bytes,
     // avoiding both the XOR code and CPU pixel accesses. Mixed colors ensure
     // every RGB channel also occupies every RGBA word byte (including alpha).
-    auto* reference=rknn_create_mem(ctx,stride*h*3);if(!reference)return 1;
+    rks_image* reference_owner=nullptr;rks_frame reference_frame{};
+    if(rks_allocate_image(w,h,RKS_RGB888,&reference_owner,&reference_frame))return fail("reference allocation");
+    if(reference_frame.row_stride_bytes!=stride*3||reference_frame.height_stride!=h)return 1;
+    // The VA satisfies the external-memory runtime contract. Only the optional
+    // diagnostic below reads these pixels; RGA generates the reference input.
+    void* reference_address=mmap(nullptr,reference_frame.size_bytes,PROT_READ|PROT_WRITE,MAP_SHARED,reference_frame.fd,0);
+    if(reference_address==MAP_FAILED)return 1;
+    auto* reference=rknn_create_mem_from_fd(ctx,reference_frame.fd,reference_address,reference_frame.size_bytes,0);if(!reference)return 1;
     auto reference_handle=importbuffer_fd(reference->fd,int(reference->size));if(!reference_handle)return 1;
     auto reference_image=wrapbuffer_handle(reference_handle,w,h,RK_FORMAT_RGB_888,stride,h);
     uint32_t colors[]={0xff000000,0xff010101,0xff7f7f7f,0xff808080,0xffffffff,0xff7f0180,0xff80ff7f,0xffff8000};
@@ -116,6 +126,7 @@ int main(int argc,char** argv){
     auto odd=frame;odd.width=w-1;if(rks_run(s,&odd,&info))return fail("valid odd RGB width");
     std::puts("valid odd RGB width accepted with aligned row stride");
     rknn_outputs_release(ctx,outputs,ref_out.data());releasebuffer_handle(reference_handle);rknn_destroy_mem(ctx,reference);
+    munmap(reference_address,reference_frame.size_bytes);rks_release_image(reference_owner);
     struct stat input_stat{};if(fstat(info.input_dma_fd,&input_stat))return 1;
     std::printf("bound input DMA fd=%d inode=%llu; same imported fd used by RGA dst and RKNN set_io_mem pass_through=1\n",info.input_dma_fd,static_cast<unsigned long long>(input_stat.st_ino));
     rks_image* draw_owner=nullptr;rks_frame draw{};
@@ -133,13 +144,13 @@ int main(int argc,char** argv){
     bad=frame;bad.row_stride_bytes++;if(rks_run(s,&bad,&info)==0)return 1;
     bad=frame;bad.fd=-1;if(rks_run(s,&bad,&info)==0)return 1;
     bad=frame;bad.size_bytes=UINT64_MAX;if(rks_run(s,&bad,&info)==0)return 1;
-    bad=frame;bad.size_bytes=uint64_t(mem->size)+4096;if(rks_run(s,&bad,&info)==0)return 1;
+    bad=frame;bad.size_bytes=frame.size_bytes+4096;if(rks_run(s,&bad,&info)==0)return 1;
     bad=frame;bad.height+=16;bad.height_stride+=16;bad.size_bytes=uint64_t(bad.row_stride_bytes)*bad.height_stride;if(rks_run(s,&bad,&info)==0)return 1;
     bad=frame;bad.format=RKS_NV12;bad.width--;bad.color_space=RKS_BT601_LIMIT;if(rks_run(s,&bad,&info)==0)return 1;
     bad=frame;bad.format=99;if(rks_run(s,&bad,&info)==0)return 1;
     if(rks_copy_frame(&frame,&frame)==0)return 1;
     std::puts("bad stride/fd/size/odd NV12/format/aliased-copy rejection passed");
-    releasebuffer_handle(handle);rknn_destroy_mem(ctx,mem);rknn_destroy(ctx);rks_destroy(s);
+    releasebuffer_handle(handle);rks_release_image(source_owner);rknn_destroy(ctx);rks_destroy(s);
     int warm_fds=descriptors();
     for(int i=0;i<5;i++){s=nullptr;if(rks_create(argv[1],&s))return fail("recreate");rks_destroy(s);if(descriptors()!=warm_fds)return 1;}
     std::printf("fd cold=%d warm_baseline=%d final=%d (five recreate/destroy cycles stable)\n",initial_fds,warm_fds,descriptors());

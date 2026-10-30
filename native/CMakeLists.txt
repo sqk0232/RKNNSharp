@@ -10,6 +10,13 @@ endif()
 find_path(RGA_INCLUDE_DIR im2d.h PATH_SUFFIXES rga REQUIRED)
 find_library(RGA_LIBRARY rga REQUIRED)
 add_library(rknnsharp_native SHARED src/rknnsharp.cpp)
+# The packaged bridge resolves vendor libraries from the deployment environment,
+# never from the private SDK directory used to build it.
+set_target_properties(rknnsharp_native PROPERTIES
+  SKIP_BUILD_RPATH TRUE
+  INSTALL_RPATH ""
+  INSTALL_RPATH_USE_LINK_PATH FALSE)
+install(TARGETS rknnsharp_native LIBRARY DESTINATION lib)
 target_include_directories(rknnsharp_native PUBLIC include PRIVATE "${RKNN_INCLUDE_DIR}" "${RGA_INCLUDE_DIR}")
 target_link_libraries(rknnsharp_native PRIVATE "${RKNN_LIBRARY}" "${RGA_LIBRARY}")
 target_compile_options(rknnsharp_native PRIVATE -Wall -Wextra -Werror -fvisibility=hidden)

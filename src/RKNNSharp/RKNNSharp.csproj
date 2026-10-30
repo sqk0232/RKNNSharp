@@ -1,5 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <PackageId>RKNNSharp</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>sqk0232</Authors>
+    <RepositoryUrl>https://github.com/sqk0232/RKNNSharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/sqk0232/RKNNSharp</PackageProjectUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>RKNN;RK3588;RGA;Linux;ARM64</PackageTags>
+    <!-- 发布二进制中的调试路径使用固定虚拟根, 不暴露构建主机目录. -->
+    <PathMap Condition="'$(Configuration)' == 'Release'">$(MSBuildProjectDirectory)=/_/src/RKNNSharp</PathMap>
+    <RKNNSharpNativeLibraryPath Condition="'$(RKNNSharpNativeLibraryPath)' == ''">$(MSBuildProjectDirectory)/../../publish/native/linux-arm64/librknnsharp_native.so</RKNNSharpNativeLibraryPath>
     <Description>RK3588 DMA-frame RKNN inference with RGA preprocessing.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <!-- Self-evident DTO members need no duplicated prose; retain all correctness warnings. -->
@@ -7,5 +19,12 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="RKNNSharp.Tests" />
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="$(RKNNSharpNativeLibraryPath)" Pack="true" PackagePath="runtimes/linux-arm64/native/librknnsharp_native.so" Visible="false" />
   </ItemGroup>
+  <Target Name="ValidateRKNNSharpNativePackageAsset" BeforeTargets="GenerateNuspec">
+    <Error Condition="!Exists('$(RKNNSharpNativeLibraryPath)')"
+           Text="RKNNSharp requires a verified Linux ARM64 native bridge. Set RKNNSharpNativeLibraryPath to the matching librknnsharp_native.so before packing." />
+  </Target>
 </Project>
