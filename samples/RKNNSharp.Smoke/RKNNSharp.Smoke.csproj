@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/RKNNSharp/RKNNSharp.csproj" /></ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="RKNNSharp.Tests" /></ItemGroup>
+</Project>

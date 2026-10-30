@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RKNNSharp/RKNNSharp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/RKNNSharp.Tests/RKNNSharp.Tests.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/RKNNSharp.Smoke/RKNNSharp.Smoke.csproj" />
+  </Folder>
+</Solution>

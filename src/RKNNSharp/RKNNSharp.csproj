@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>RK3588 DMA-frame RKNN inference with RGA preprocessing.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Self-evident DTO members need no duplicated prose; retain all correctness warnings. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="RKNNSharp.Tests" />
+  </ItemGroup>
+</Project>
