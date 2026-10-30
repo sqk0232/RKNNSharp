@@ -28,7 +28,7 @@ BSP必须提供本实现使用的RGA3、NPU和`/dev/dma_heap/system-uncached-dma
 
 ## 本地验收记录说明
 
-以下为2026-10-29的特定设备记录. 机器SDK路径、`.artifacts`日志/候选二进制和私有模型不作为公开下载内容或构建前提; 首次使用按上面的变量化步骤. 历史hash只标识当时实测产物, 不要求读者取得这些文件或构建出相同hash.
+以下为 2026-10-29 的特定设备记录。私有模型与开发日志不随源码提供，也不是构建前提；首次使用请按上面的变量化步骤。历史 hash 只标识当时实测产物，不要求读者取得这些文件或构建出相同 hash，性能数字不构成其他环境的保证。
 
 ## 实测版本与依赖
 
@@ -104,11 +104,11 @@ RKS_DIAGNOSTIC_READBACK=1 "$NATIVE_BUILD_DIR/rknnsharp_hardware_smoke" "$MODEL_P
 
 早期短基线为 batch1、一个 context、RKNN 默认 core policy：一次启动帧后连续三帧常量 114，RGA 预处理约 2 ms、NPU run 约 17.1 ms、float 输出取得约 2.6 ms；raw 输出取得热帧观察约 0.70–0.78 ms。时间由同步调用边界的 monotonic clock 测量，预处理包含外部 fd 导入；不包含 RTSP、解码、C# 拷贝检测张量或 YOLO NMS，不能换算成完整管线吞吐承诺。真实流完整阶段基准由 sample 的 warmup/测量日志给出。环境快照 NPU 温度约 38.8°C。没有测量 DDR 带宽、持续负载、节流或长期稳定性；未调整频率、governor、驱动或模型。
 
-单会话真实流主对照见 `.artifacts/integration/benchmark-run-abi2.log` 和 `benchmark-detect-abi2.log`：同 ABI、各 5 warmup+60 帧，平均完整处理 33.130→26.080 ms，Gen2 GC 24→0。相机内容随时间变化，这不是静态逐像素同输入的耗时对照；同帧数值验收单独见 `raw-float-compare.log`，12 对帧的检测 count/class/order 相同，最大 score 差 `2.9802322e-8`、坐标差 `0.00012207031` 像素。[完整阶段定义与日志](integration.md#单会话性能对照)。
+历史单会话真实流主对照：同 ABI、各 5 warmup+60 帧，平均完整处理 33.130→26.080 ms，Gen2 GC 24→0。相机内容随时间变化，这不是静态逐像素同输入的耗时对照；同帧数值验收中，12 对帧的检测 count/class/order 相同，最大 score 差 `2.9802322e-8`、坐标差 `0.00012207031` 像素。[完整阶段定义与历史测量](integration.md#单会话性能对照)。
 
 ## 当前模型的算子执行设备
 
-在独立诊断 context 中仅启用 `RKNN_FLAG_COLLECT_PERF_MASK`，按本板 1.5.2 头文件要求，在一次同步 `rknn_run` 和 `rknn_outputs_get` 后查询 `RKNN_QUERY_PERF_DETAIL`。正式库和性能计时 context 没有启用该标志，模型、驱动、时钟和 ABI 2 均未改变。原始报告见 `.artifacts/hardware/perf-detail.txt`，命令/版本记录见 `perf-detail.log`，可复现的独立诊断源码为 `perf_detail.cpp`。
+在独立诊断 context 中仅启用 `RKNN_FLAG_COLLECT_PERF_MASK`，按本板 1.5.2 头文件要求，在一次同步 `rknn_run` 和 `rknn_outputs_get` 后查询 `RKNN_QUERY_PERF_DETAIL`。正式库和性能计时 context 没有启用该标志，模型、驱动、时钟和 ABI 2 均未改变。这是历史诊断结果；该独立诊断程序不随本仓库提供。
 
 报告共 82 个节点，其中 78 个神经网络计算节点全部标记 `Target=NPU`：ConvRelu 50、ConvReluAdd 7、Concat 13、MaxPool 3、ConvTranspose 2、Conv 3。其余 4 个节点是 `InputOperator:images` 和三个 `OutputOperator`，标记 `CPU`、NPU cycles 为 0，报告耗时合计 92 µs。没有 GPU target，也未报告 `fallback` 或 `unsupported` 标记。
 
@@ -132,7 +132,7 @@ RKS_DIAGNOSTIC_READBACK=1 "$NATIVE_BUILD_DIR/rknnsharp_hardware_smoke" "$MODEL_P
 
 独立 `native/tests/concurrency_probe.cpp` 使用当前 GStreamer adapter 在其自身进程持有六个真实 2560×1440 NV12 样本并 PAUSED。原始样本 fd/lease 直到所有测试结束才释放；诊断只读 CPU 取样/指纹与逐字节对照不进入生产预处理，不用于修正像素。
 
-修复前证据分别保存在 `.artifacts/hardware/concurrency-initial.log` 和 `concurrency-core-interp.log`：
+历史修复前诊断观察到：
 
 - 六个源 allocation 首尾指纹不变；三个 context 串行处理时，signed 输入与 raw 输出相同。
 - 完整并发时，约每轮一个 context 的 signed 输入出现约 40 万字节差异，随后 NPU 输出不同；context 位置不固定。
@@ -141,30 +141,19 @@ RKS_DIAGNOSTIC_READBACK=1 "$NATIVE_BUILD_DIR/rknnsharp_hardware_smoke" "$MODEL_P
 
 最小生产修复只对推理 resize/CSC 的 `improcess` 传入每任务 `im_opt_t`：`core=RGA3_CORE0|RGA3_CORE1`、双向 LINEAR，避免全局或线程 `imconfig` 状态竞争。仍允许两个 RGA3 调度，RGA2 继续负责经过数值验证的 fill/ROP，三个 NPU context 保持独立并发；没有串行整个推理链路。官方对强制 core/priority 的产品使用有谨慎说明，因此本后端只采用已实测的 RK3588 core 集合，保留原优先级，遇不兼容 geometry 显式失败；不能泛化为其他 BSP/SoC 自动安全。
 
-修复后 `concurrency-rga3-fixed.log` 对同六个 PAUSED 真实源执行 90 次同源并发和 180 次混源并发：共 270 次的 signed 输入、三个完整 raw INT8 输出均与**旧串行 RGA3 DEFAULT** 参考逐字节相同，六个源指纹首尾不变，测试退出 0，`exact_equal=1`。这批实际帧上旧串行参考没有变化。安全 smoke 重跑记录为 `diagnostic-rga3-fix.log`，原有量化/stride/小框/失败失效/释放检查全部通过。托管 pipeline 的最终真实重放与性能复测见整合文档。
+修复后对同六个 PAUSED 真实源执行 90 次同源并发和 180 次混源并发：共 270 次的 signed 输入、三个完整 raw INT8 输出均与**旧串行 RGA3 DEFAULT** 参考逐字节相同，六个源指纹首尾不变，测试退出 0，`exact_equal=1`。这批实际帧上旧串行参考没有变化。安全 smoke 重跑中，原有量化/stride/小框/失败失效/释放检查全部通过。托管 pipeline 的最终真实重放与性能复测见整合文档。
 
 额外检查 owned `CopyFrom` 的无缩放 2560×1440 NV12→RGB：两个 RGA3 产生完全相同的 RGB 字节；强制 RGA2 在此 geometry 被 kernel 以 `no core match` 拒绝，而不是产生另一组有效像素。因此当前实际底图复制路径没有证据要求扩大修改，`rks_copy_frame` 保留自动兼容核心选择；这一结论不等于任意尺寸的 RGA2 CSC 均已验证等价。
 
-该诊断测试直接包含 native 实现以访问内部缓冲并隔离阶段，不增加生产导出/测试钩子。在板端 hardware 测试目录实际使用以下编译和执行命令：
+该诊断测试直接包含 native 实现以访问内部缓冲并隔离阶段，不增加生产导出或测试钩子。源码为 `native/tests/concurrency_probe.cpp`；它是开发期独立诊断程序，未纳入当前 CMake 目标，不是首次使用或标准构建的前提。运行时的第二个参数为私有 URL 文件。
 
-```sh
-sdk="$RKNN_SDK_DIR"
-gst='/tmp/rknnsharp-20261029/gstreamer'
-g++ -O2 -std=c++17 tests/concurrency_probe.cpp -Iinclude \
-  -I"$sdk/include" -I/usr/include/rga -I"$gst" \
-  -L"$sdk/aarch64" -L"$gst/build" \
-  -Wl,-rpath,"$sdk/aarch64" -Wl,-rpath,"$gst/build" \
-  -lrknnrt -lrga -lrknnsharp_gst -pthread -o concurrency_probe
-./concurrency_probe $MODEL_PATH $RTSP_URL_FILE fixed
-```
-
-第二个参数是进程内部读取的私有 URL 文件，不在日志或命令参数中展开凭证。ABI 仍为 2；此轮预处理修复基线库 SHA256 为 `e0b09bd19034900c9697a04059c9ee27b1d81bc1113c1fc53dbb4d2df50d8d15`。
+私有 URL 文件仅由进程内部读取，不在日志或命令参数中展开凭证。ABI 仍为 2；此轮预处理修复基线库 SHA256 为 `e0b09bd19034900c9697a04059c9ee27b1d81bc1113c1fc53dbb4d2df50d8d15`。
 
 ## 同色绘框批量提交
 
 `rks_draw_rectangles` 先验证全部参数，导入目标一次，再将最多 8 个矩形加入一个 RGA job（最多 32 个边框填充任务），`imendJob(IM_SYNC)` 完成后继续下一批。相同颜色的覆盖写入可交换，重叠框不依赖执行先后；没有混色或异步返回。未提交任务遇错由 RAII 取消，硬件错误仍向调用者传播。公开 ABI 和独占目标 DMA 生命周期不变，推理 resize/CSC 的每任务双 RGA3 策略不变。
 
-独立 `native/tests/draw_batch_benchmark.cpp` 同时保留旧同步逐框调用与新公开入口，像素初始化和绘图均由 RGA 完成。CPU 只读映射及 DMA-BUF READ sync 只用于测试逐字节对照，不进入生产像素路径。RGB888、RGBA8888、NV12 的 640×480 与有行 padding 的 642×482，各 37–38 个普通、重叠、填充及边缘小框，所有可见字节相同，padding 均未改写。额外 12 个 RGB/RGBA origin-one 小框与独立硬件 marker 参考完全相同。原有拒绝证据保留在 `draw-batch-existing-odd-tiny-failure.log`，原点 0/1/2/3 的矩阵证据在 `draw-tiny-matrix.log`，没有将该边界静默排除。
+独立 `native/tests/draw_batch_benchmark.cpp` 同时保留旧同步逐框调用与新公开入口，像素初始化和绘图均由 RGA 完成。CPU 只读映射及 DMA-BUF READ sync 只用于测试逐字节对照，不进入生产像素路径。RGB888、RGBA8888、NV12 的 640×480 与有行 padding 的 642×482，各 37–38 个普通、重叠、填充及边缘小框，所有可见字节相同，padding 均未改写。额外 12 个 RGB/RGBA origin-one 小框与独立硬件 marker 参考完全相同。原有拒绝情况与原点 0/1/2/3 的完整矩阵均单独检查，没有将该边界静默排除。
 
 2560×1440 RGB888，10 次 warmup + 100 次测量，仅绘框调用的平均耗时如下；不是完整流水线吞吐或单帧推理延迟：
 
@@ -177,17 +166,15 @@ g++ -O2 -std=c++17 tests/concurrency_probe.cpp -Iinclude \
 
 板端实际命令为 `cmake --build build -j2`、`./build/rknnsharp_draw_batch_benchmark`、`RKS_DIAGNOSTIC_READBACK=1 ./build/rknnsharp_hardware_smoke $MODEL_PATH`，退出均为 0。生产目标使用 `-Wall -Wextra -Werror` 构建通过；直接包含实现的诊断目标仅有匿名 namespace 字段的 subobject-linkage 警告。安全 smoke 的 stride/实际 allocation/失败输出失效/量化/释放检查通过，FD warm 8→final 8。
 
-候选再按上节命令执行真实六源 `concurrency_probe ... fixed`：270 个请求的 signed 输入和三个完整 raw INT8 输出逐字节相同，六源 allocation 指纹均不变。日志位于 `.artifacts/hardware/{build-draw-batch,draw-batch-production,smoke-draw-batch,concurrency-draw-batch}.log`。当前产物 SHA256 为 `09971b537e2798947794bb24cb5a00973cc63089e69814b77287a7bf2f15c95e`，ABI 2；旧基线二进制保留为 `.artifacts/hardware/librknnsharp_native-baseline-e0b09.so`。完整含 VPU 的吞吐和严格检测对照由整合 sample 单独记录，不用本节绘框数字估算。
+候选再按上节命令执行真实六源 `concurrency_probe ... fixed`：270 个请求的 signed 输入和三个完整 raw INT8 输出逐字节相同，六源 allocation 指纹均不变。当前产物 SHA256 为 `09971b537e2798947794bb24cb5a00973cc63089e69814b77287a7bf2f15c95e`，ABI 2。完整含 VPU 的吞吐和严格检测对照由整合 sample 单独记录，不用本节绘框数字估算。
 
-最终增加测试专用 `fixed6` 模式覆盖每核两个独立 context：`./concurrency_probe $MODEL_PATH $RTSP_URL_FILE fixed6`。六个 session 的 core mask 为 1/2/4/1/2/4，仍各自拥有 signed DMA 与输出；六个真实 PAUSED 源先按旧串行 RGA3 参考建立 baseline，再执行 180 个同源并发与 360 个混源轮转请求。540 个请求的 signed 输入及三个完整 raw 输出全部逐字节相同，六源 allocation 首尾 hash 不变，退出 0，最终 so hash 仍为上述 `09971b...`。证据为 `.artifacts/hardware/concurrency-six-session-final.log`；这是数值诊断，不作吞吐计时。
+最终增加测试专用 `fixed6` 模式覆盖每核两个独立 context：`./concurrency_probe $MODEL_PATH $RTSP_URL_FILE fixed6`。六个 session 的 core mask 为 1/2/4/1/2/4，仍各自拥有 signed DMA 与输出；六个真实 PAUSED 源先按旧串行 RGA3 参考建立 baseline，再执行 180 个同源并发与 360 个混源轮转请求。540 个请求的 signed 输入及三个完整 raw 输出全部逐字节相同，六源 allocation 首尾 hash 不变，退出 0，最终 so hash 仍为上述 `09971b...`。这是数值诊断，不作吞吐计时。
 
 板端 1.5.2 和当前官方公开 C API 中未发现 CUDA Graph 类的 capture/replay graph-executable 接口。`.rknn` 已是预编译模型；本库持久化 context、预分配并绑定 DMA I/O，然后重复 `rknn_run`，已经避免逐帧重建模型和输入缓冲。这不等于能捕获 VPU→RGA→NPU 的跨设备图。异步 flag 是不同的结果/调度契约，不能透明替换当前同步 Detect。
 
 尚未找到足够官方依据保证当前 compiler1.5.0 模型在较新 2.x runtime 上直接获得多核或性能收益，因此没有下载新 runtime 或进行猜测性的版本 A/B，也没有替换现有运行库。
 
-用户提供的 [yolo26-rk3588-cpp](https://github.com/li2390893/yolo26-rk3588-cpp/tree/db83c751b2eb55998b88f06084e6b294e1573739) 已按固定 commit 只读对照。其实际构建应用采用单 context 同步运行，没有线程池/显式核分配；使用 OpenCV 的 padding、颜色转换、resize、memcpy 和绘框，不能直接移植为当前要求的硬件像素路径。其 [video FPS 标签](https://github.com/li2390893/yolo26-rk3588-cpp/blob/db83c751b2eb55998b88f06084e6b294e1573739/src/yolo26_video.cpp#L84-L105) 需要区分循环吞吐日志和来源于 `CAP_PROP_FPS` 的视频源标签；[Inference 计时](https://github.com/li2390893/yolo26-rk3588-cpp/blob/db83c751b2eb55998b88f06084e6b294e1573739/src/task/yolo26.cpp#L213-L236) 也包含输入设置、输出取得及复制。它使用不同的 YOLO26 n/s 模型和后处理输出结构，[README](https://github.com/li2390893/yolo26-rk3588-cpp/blob/db83c751b2eb55998b88f06084e6b294e1573739/README.md#L8-L12) 还记录了原始模型 INT8 推理待解决的问题，不能用作当前 YOLOv5s 同模型、同输入、同阈值的性能基准。未读取大型权重，未推测模型激活替换或复现其外部视频数字。
-
-证据保存在本地 `.artifacts/hardware/{environment,probe,smoke,diagnostic}.log`，以及板端隔离目录。最终 AArch64 桥接二进制位于 `.artifacts/hardware/linux-arm64/librknnsharp_native.so`；环境日志包含 SHA256 与真实依赖解析路径。该构建的 loader 路径引用测试设备现有 SDK，其他机器应使用自己匹配的运行库重新构建或显式配置 loader，不复制本机路径假装通用部署。
+历史构建的 loader 路径引用测试设备现有 SDK；其他机器应使用自己匹配的运行库重新构建或显式配置 loader，不复制开发设备路径作为通用部署方式。
 
 ## 官方依据与验证边界
 
@@ -196,5 +183,4 @@ g++ -O2 -std=c++17 tests/concurrency_probe.cpp -Iinclude \
 - [Rockchip MPP](https://github.com/rockchip-linux/mpp)：VPU 部分由 sample 的媒体 adapter 验证，模型语义与 sigmoid/anchors 见 [model-contract.md](model-contract.md)。
 
 真实 RTSP 的 VPU→DMA-BUF→本桥接→C# 后处理综合验收由 sample 整合测试单独记录。原生 smoke 不包含摄像头内容或标注集；当前不能宣称目标域准确率、mAP 或所有 Rockchip/BSP/模型版本兼容。失败时保留错误和资源收尾，用户可停止使用本任务产物；本次未改系统组件和已有模型，无系统版本回退步骤。
-
 

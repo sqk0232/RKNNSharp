@@ -62,7 +62,7 @@ foreach (Detection detection in result.Detections)
 在构建主机发布自包含示例，输出目录可自行调整：
 
 ```sh
-dotnet publish samples/RKNNSharp.Smoke -c Release -r linux-arm64 --self-contained true -o .artifacts/publish/linux-arm64
+dotnet publish samples/RKNNSharp.Smoke -c Release -r linux-arm64 --self-contained true -o publish/linux-arm64
 ```
 
 将整个输出目录传到目标板。按[核心原生构建](docs/hardware.md#从源码构建)和[采集 adapter 构建](docs/gstreamer.md#从源码构建与首次检查)生成 `librknnsharp_native.so`、`librknnsharp_gst.so`，放入板端发布目录，并配置 RKNN/RGA 动态库搜索路径。自包含仅包含 .NET 运行时。

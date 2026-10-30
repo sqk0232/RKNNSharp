@@ -89,10 +89,10 @@ frame 的 `color_space`：0=未声明/不支持完整组合，1=BT.601 limited�
 `inspect_sps.py` 只解析 baseline/main/extended SPS 压缩头，派生尺寸与已捕获 caps 交叉核对；不解码图像。可本地重现：
 
 ```text
-python samples/GStreamerNative/inspect_sps.py samples/GStreamerNative/evidence/2026-10-29/rtsp-compressed-caps.txt OUTPUT_DIRECTORY
+python samples/GStreamerNative/inspect_sps.py CAPS_FILE OUTPUT_DIRECTORY
 ```
 
-原始 Annex B SPS/PPS 与 JSON 在同目录。协议字段定义可对照 [GStreamer H.264 parser 与其链接的 H.264 标准](https://gstreamer.freedesktop.org/documentation/codecparsers/gsth264parser.html)。
+`CAPS_FILE` 替换为自行捕获的 h264parse 输出 caps 文本文件，`OUTPUT_DIRECTORY` 指定新的输出目录。脚本生成 Annex B SPS/PPS 与 JSON，不附带摄像头协议快照。协议字段定义可对照 [GStreamer H.264 parser 与其链接的 H.264 标准](https://gstreamer.freedesktop.org/documentation/codecparsers/gsth264parser.html)。
 
 ## 构建、有限帧测试与凭证
 
@@ -125,13 +125,13 @@ API bus error 只返回来源元素、domain、code 和识别出的 401，不返
 | 所有权/失败 | 持有期间 fd 有效；未释放重复 pull 被拒绝；重复 release 安全；缺文件报错 |
 | 资源观察 | 上述本地验证进程 peak RSS=26224 KiB，仅短时快照 |
 
-脱敏原始日志及协议证据同时保存在远端本任务目录和 `samples/GStreamerNative/evidence/2026-10-29`。`local-mp4-decode.log` 中厂商插件在起始/结束可打印 PTS/missing-frame 警告，仍实际读取全部 30 帧且正常 EOS。
+历史本地 MP4 测试中，厂商插件在起始/结束曾打印 PTS/missing-frame 警告，仍实际读取全部 30 帧且正常 EOS。原始媒体与诊断日志不随源码提供。
 
 `arrival_monotonic_ns` 是应用 pull 观察时间，不是曝光时间。`running_time_ns` 是 sample segment 对 PTS 的转换；两者不可直接相减当端到端延迟。未建立相机时钟到主机时钟映射，未测曝光到推理结果延迟、长期内存趋势、实际丢帧计数、断流恢复、H.265 或录像/输出编码。PTS 跨帧只能证明本次慢消费跳过帧，不能单独区分网络、解码与应用队列各自丢帧数量。本 adapter 不自动重连，也不包含推理、检测后处理和输出编码；完整链路验收由整合样例完成。
 
 ## 并行消费者的媒体边界
 
-adapter 不把 capture 限制为“全局只能有一帧在途”。`rkgst_pull` 检查的是传入的那个结构的 token；单一采集线程每次提供独立的全零结构，即可借出多个独立 sample。板端已持有六帧后才归还：六个不同 token、六个不同 DMABUF fd、递增 PTS；再由三个消费者线程乱序归还，并成功继续采集。证据为 `adapter-multilease.log`。该测试只运行 VPU 与生命周期操作，没有占用 NPU；三 NPU 会话调度由整合样例负责。
+adapter 不把 capture 限制为“全局只能有一帧在途”。`rkgst_pull` 检查的是传入的那个结构的 token；单一采集线程每次提供独立的全零结构，即可借出多个独立 sample。板端已持有六帧后才归还：六个不同 token、六个不同 DMABUF fd、递增 PTS；再由三个消费者线程乱序归还，并成功继续采集。该测试只运行 VPU 与生命周期操作，没有占用 NPU；三 NPU 会话调度由整合样例负责。
 
 每个 sample 应由一个引用型独占 lease 对象管理，交给一个 worker；不要把含 token 的 C 结构按值复制成多个可释放 owner，也不要对同一结构并发调用 pull/release。一次 `rkgst_release` 只归还该 sample，不访问 capture 对象；不同 sample 可以由不同消费者线程归还。若某帧需要广播多个消费者，必须在上层共享一个引用计数 owner，最后一个消费者才执行原生 release；当前三 worker 分工是不同帧，不需要广播。
 
@@ -142,22 +142,11 @@ adapter 不把 capture 限制为“全局只能有一帧在途”。`rkgst_pull`
 3. 入队失败、被替换的旧帧、取消清队列、worker/后处理异常都必须释放各自尚未转移的 lease。硬件同步调用尚未返回时不能释放。若要在后处理释放 decoder sample 之前绘框，先完成 RGA 硬件复制，绘制对象为独占 DMA 图像；释放来源帧后只可保留独占输出与元数据。
 4. 关闭顺序为停止 producer 并等待其退出、完成/清理队列、等待所有 worker 及有序输出消费退出、确认 leased sample 全部归还，最后调用 `rkgst_close`。native close 不自行等待外部 lease，也不提供取消正在运行硬件操作的能力。
 
-参考项目中已存在的对应约定（只读借鉴，未复制 CUDA 或 CPU 像素实现）：
-
-| 仓库与路径/行 | 可复用约定 |
-| --- | --- |
-| Framework `src/SYVision.Core/Base/CaptureBase.cs:133`、`:278`、`:332` | 发布所有权转移失败时 finally Dispose；有界 Wait 通道；需丢旧帧时手动移出并 Dispose，不静默丢失 owner |
-| Framework 同文件 `:220` | 停止后清空尚未消费的队列并 Dispose |
-| Framework `src/SYVision.Core.Abstractions/Pipelines/OrderedConcurrentPipeline.cs:54`、`:74`、`:101`、`:168` | 执行许可与总缓冲许可分离；每个执行结果携带原始 Input/Result/Error；按序输出后 finally disposeInput |
-| Framework `src/SYVision.Capture/Linux/SYVision.Capture.Linux.GStreamerRtsp/GStreamerRtspReader.cs:249` | sample 成功转移给 owned buffer 后才清空局部 sample；失败路径 unref |
-| Framework `src/SYVision.Core/Models/GpuWorkflowFrame.cs:188`、`:245` | 需要广播时每消费者独立 lease，最终引用归还底层缓冲 |
-| Framework `src/SYVision.Core/Services/WorkflowFrameChannelService.cs:489`、`:495` | latest-only 槽位通过交换转移 owner，被替换旧帧立即释放；适用于独立预览消费者，不作为检测 frame/result 配对方式 |
-
-Framework 的 `CaptureFrame.Timestamp` 是毫秒字段，其 Linux RTSP 实现在 `GStreamerRtspCapture.cs:185` 使用 `Environment.TickCount64`，并非媒体 PTS；本样例必须保留两者语义，不能机械照搬字段名。
+媒体 PTS 与本机观察时间分别记录，不能用主机时钟替代媒体时间戳。
 
 ## 已有日志的实际交付速率
 
-从真实 `rtsp-updated-credentials.log` 的 30 个已交付帧计算 29 个间隔，详见 `rtsp-delivery-rate.json`：
+从历史真实 RTSP 测试的 30 个已交付帧计算 29 个间隔：
 
 | 时间序列 | 观察窗口 | 交付率 | 间隔中位数 / 最大值 |
 | --- | --- | --- | --- |
@@ -188,12 +177,14 @@ Framework 的 `CaptureFrame.Timestamp` 是毫秒字段，其 Linux RTSP 实现�
 重现命令不把 URI 或密码放在参数中：
 
 ```sh
-timeout 20s python3 /tmp/rknnsharp-20261029/gstreamer/verify_pause.py /tmp/rknnsharp-20261029/gstreamer/build/librknnsharp_gst.so /tmp/rknnsharp-20261029/hardware/build/librknnsharp_native.so $RTSP_URL_FILE /tmp/rknnsharp-20261029/gstreamer/adapter-pause.log
+read -r -p '暂停验证日志输出文件: ' PAUSE_LOG_PATH
+: "${PAUSE_LOG_PATH:?未设置日志输出文件}"
+timeout 20s python3 samples/GStreamerNative/verify_pause.py "$GST_BUILD_DIR/librknnsharp_gst.so" "$NATIVE_BUILD_DIR/librknnsharp_native.so" "$RTSP_URL_FILE" "$PAUSE_LOG_PATH"
 ```
 
 `verify_pause.py` 是样例目录内的有限验证脚本：读取 URI 文件但不打印/下载，检查独立 sample、PAUSED 状态、输出探针、fd 与 RGA 访问，无 CPU 像素映射。探针稳定证明本次窗口没有新增解码输出，不能据此声称所有网络流量或 RTCP/keepalive 消失，也不等于整机 VPU/NPU 资源完全空闲。官方行为参见 [GstElement 状态变更与 NO_PREROLL](https://gstreamer.freedesktop.org/documentation/gstreamer/gstelement.html) 和 [rtspsrc PAUSED 会请求 RTSP PAUSE](https://gstreamer.freedesktop.org/documentation/rtsp/rtspsrc.html)。
 
-证据为 `evidence/2026-10-29/adapter-pause.log` 与 `pause-build.log`，远端同名文件保留在本任务目录。交付时 `librknnsharp_gst.so` SHA-256 为 `4063e3489063eb1744dcfdbb5a70d8d1042d1f6ade4956bb2f74f00467382374`；集成者复制后应再次核对哈希。
+`PAUSE_LOG_PATH` 由调用者设置为新的日志文件路径；两个构建目录沿用前述配置。上述历史暂停验证对应 adapter SHA-256 为 `4063e3489063eb1744dcfdbb5a70d8d1042d1f6ade4956bb2f74f00467382374`，不要求自行构建得到相同二进制。
 
 ## 包含持续 VPU 解码的无节拍输入
 
@@ -205,11 +196,7 @@ rtspsrc(TCP) -> rtph264depay -> h264parse
   -> identity eos-after=601 -> mp4mux -> filesink
 ```
 
-此过程只解析/复用压缩码流，没有解码器、编码器、CPU 图像映射或像素转换。`capture_compressed.py` 在设备内部读取 `$RTSP_URL_FILE`；正常 EOS 后关闭 pipeline，检查尺寸、packet 数与首关键帧，再把 `.partial.mp4` 原子改名。脚本会拒绝覆盖已有素材。实际捕获 10.146 秒，视频保留在：
-
-```text
-/tmp/rknnsharp-20261029/gstreamer/camera-fixture/camera-2k-h264.mp4
-```
+此过程只解析/复用压缩码流，没有解码器、编码器、CPU 图像映射或像素转换。`capture_compressed.py` 在设备内部读取 `$RTSP_URL_FILE`；正常 EOS 后关闭 pipeline，检查尺寸、packet 数与首关键帧，再把 `.partial.mp4` 原子改名。脚本会拒绝覆盖已有素材。实际捕获 10.146 秒。测试视频不随源码提供，使用时以自己的 `VIDEO_PATH` 指定有限 MP4 文件。
 
 | 元数据 | 实际值 |
 | --- | --- |
@@ -236,11 +223,11 @@ int rkgst_open_file_unpaced(const char *path, const char *codec,
 有限 VPU-only 验证命令：
 
 ```sh
-timeout 12s /tmp/rknnsharp-20261029/gstreamer/build/rknnsharp_gst_probe file-unpaced /tmp/rknnsharp-20261029/gstreamer/camera-fixture/camera-2k-h264.mp4 h264 601
+timeout 12s "$GST_BUILD_DIR/rknnsharp_gst_probe" file-unpaced "$VIDEO_PATH" h264 601
 ```
 
 实际收到 600/600 帧，0 timeout，EOS，PTS 严格递增，所有帧尺寸保持 2560×1440、ABI=112。冷启动进程耗时 1.2364 秒，600/耗时=485.27 fps；首末交付观察间隔计算约 512.32 fps。两者只包含 VPU 解码、描述符检查与 pull/release，**没有包含 RGA/NPU/后处理/复制/绘框，不代表完整流水线达到该吞吐**。完整吞吐由整合样例以此有限输入另行验收。
 
-随后在独立短窗口做了十二在途预检：同文件、单 producer、每次提供独立全零 frame，单次 pull timeout 上限 3 秒。持有全部十二个 sample 后确认十二个不同 token、十二个不同 DMABUF fd、2560×1440/ABI112、PTS 递增与 fd 有效；逆序全部释放后 close 成功，总耗时 89.584ms。该预检没有运行 NPU/RGA，也没有 CPU 图像映射。`adapter-unpaced-12lease.log` 是实际容量证据，不能由前述逐帧吞吐测试替代。
+随后在独立短窗口做了十二在途预检：同文件、单 producer、每次提供独立全零 frame，单次 pull timeout 上限 3 秒。持有全部十二个 sample 后确认十二个不同 token、十二个不同 DMABUF fd、2560×1440/ABI112、PTS 递增与 fd 有效；逆序全部释放后 close 成功，总耗时 89.584ms。该预检没有运行 NPU/RGA，也没有 CPU 图像映射。这是独立的在途容量验证，不能由前述逐帧吞吐测试替代。
 
-证据：`camera-2k-metadata.json`、`camera-fixture-sps-vui.json`、`unpaced-vpu-summary.json`、`unpaced-vpu-decode.log`、`unpaced-build.log`；元数据/日志镜像在 `samples/GStreamerNative/evidence/2026-10-29`。新版 adapter SHA-256 为 `c4ff6358d437925673fb099c4051167f82736162c2439485a1e55afd751fa6ef`，保留 `rkgst_pause` 和原 112 字节 frame ABI。旧 paced 文件入口另以三帧读取、0 timeout 作兼容验证。
+该历史无节拍验证对应 adapter SHA-256 为 `c4ff6358d437925673fb099c4051167f82736162c2439485a1e55afd751fa6ef`，保留 `rkgst_pause` 和原 112 字节 frame ABI。旧 paced 文件入口另以三帧读取、0 timeout 作兼容验证。

@@ -36,6 +36,6 @@ IReadOnlyList<Detection> detections = profile.Decode(raw.Outputs, raw.Transform)
 - 量化分数并列时, NMS明确采用分支/格点/类别插入顺序的稳定策略. 原官方NumPy `argsort()[::-1]` 的同分顺序不同, 可能选择不同坐标框, 因此不宣称与原官方输出全部等价. 本次保留原官方参考的失败证据, 并另用仅固定tie顺序的独立参考在原紧容差下验证; 未扩大坐标容差来掩盖差异. Run/RunInto的SDK输出张量一致性与此后处理策略无关.
 - 不自动接受已解码 `[1,4+C,N]`、端到端NMS输出、YOLOv5 anchor logits、不同head数量/布局、姿态/分割/OBB/OCR. 这些需要各自输出契约与decoder, 不能仅换型号名.
 
-具体实测模型来源/hash、SDK属性、逐头Run/RunInto一致性、独立参考误差与耗时在本次 `.artifacts/yolo-detection-compat/REPORT.md` 及原始证据中记录. 型号名不等于任意导出版本已验证, tensor/postprocess一致性不替代有标注数据上的检测精度评估.
+上述结论仅适用于本页明确标识的实测模型及其 SDK 输出属性、Run/RunInto 和后处理契约。型号名不等于任意导出版本已验证，tensor/postprocess 一致性不替代有标注数据上的检测精度评估。
 
 

@@ -12,13 +12,8 @@ Observed on 2026-10-29. This contract applies only to the supplied binary, not a
 | Embedded compiler | `1.5.0+1fa95b5c`, compiler `1.5.0 (e6fe0c678@2023-05-25T16:15:03)` |
 | Embedded source/target | ONNX / RK3588; static shape; `dynamic_shapes={}` |
 | Runtime reported by hardware smoke | RKNN API `1.5.2 (c6b7b351a@2023-08-23T15:28:22)`, driver `0.9.8`; RGA API `1.10.1_[3]` |
-| Embedded metadata | Board `/tmp/rknnsharp-20261029/model/embedded-metadata.json` |
-| Runtime attributes | Board `/tmp/rknnsharp-20261029/hardware/probe.log` |
-| Final hardware output statistics | Local `.artifacts/hardware/smoke.log`; board `/tmp/rknnsharp-20261029/hardware/smoke.log` |
-| Input quantization boundary/reference | Local `.artifacts/hardware/diagnostic.log`; board `/tmp/rknnsharp-20261029/hardware/diagnostic.log` |
-| RTSP integration smoke | Board `/tmp/rknnsharp-20261029/integrated/rtsp-smoke.log` |
 
-The original PyTorch/ONNX model, exporter revision, training dataset, custom anchors, label order, and weight license were not supplied. A filename and a 255-channel head do not establish those facts. No weights were downloaded, converted, trained, or overwritten. Python and PyTorch are not runtime dependencies of this C# inference path; original training/framework versions remain unknown. CUDA is not used on RK3588.
+The original PyTorch/ONNX model, exporter revision, training dataset, custom anchors, label order, and weight license were not supplied. A filename and a 255-channel head do not establish those facts. No weights were downloaded, converted, trained, or overwritten. Python and PyTorch are not runtime dependencies of this C# inference path; original training software versions remain unknown. CUDA is not used on RK3588.
 
 ## Input and preprocessing
 
@@ -134,7 +129,7 @@ Targeted read-only review of `YoloV5Profile.DecodeInt8` and `LookupSet` found no
 
 The shared LUT cache is constructed completely before `Volatile.Write`; each decoding call keeps its chosen immutable `LookupSet` in a local reference. Scales and zero points are copied into the set, and its tables are not mutated after construction. Concurrent use of one profile by three model workers can publish duplicate sets or replace the cached set when quantization changes, but an in-flight decoder retains the set matching its own validated metadata. There is no shared candidate list. This reasoning assumes the internal call's tensor metadata/input buffers remain stable for the decoding call, as required by the borrowed-output contract. It is a model-cache review, not a general audit of native/session scheduling.
 
-The hardware Worker verified `want_float=0` standard NCHW element counts on two runs, generations 5 and 6, in `.artifacts/hardware/diagnostic.log` (board `/tmp/rknnsharp-20261029/hardware/diagnostic.log`). Each run compared the full head against float output:
+The hardware Worker verified `want_float=0` standard NCHW element counts on two runs, generations 5 and 6, during the historical board diagnostic. Each run compared the full head against float output:
 
 | Head | Valid raw elements | Maximum absolute float difference | Unequal float elements | Inverse-quantized q errors |
 | --- | ---: | ---: | ---: | ---: |
@@ -144,7 +139,7 @@ The hardware Worker verified `want_float=0` standard NCHW element counts on two 
 
 This verifies standard ordering and quantized values for the tested output path; the float representation is **not bit exact**. The diagnostic records large ULP distances near zero from small runtime residuals (heads 0/2: 855,638,016 / 864,026,625); the maximum absolute error does not justify a claim of a one-ULP bound. The final native library SHA-256 reported with this evidence is `99afc2f6824758f6525497406cd790e713f7bb559c601f3b54085f6068acd305`.
 
-Board `/tmp/rknnsharp-20261029/integrated/raw-float-compare.log` contains 12 paired frame comparisons, including two warm-up frames and ten measured frames. All 12 preserved final detection count, class ID and ordering. Maximum confidence difference was `2.9802322e-8`; maximum restored source-coordinate difference was `0.00012207031` pixels. The smoke comparison enforces score tolerance `1e-5` and coordinate tolerance `0.01` source pixels. It compares final results; its log does not expose every pre-NMS candidate or the retained original candidate indices. The compare mode executes both paths and is numerical validation evidence, not the optimized path's standalone frame-time benchmark.
+Historical board validation included 12 paired frame comparisons, including two warm-up frames and ten measured frames. All 12 preserved final detection count, class ID and ordering. Maximum confidence difference was `2.9802322e-8`; maximum restored source-coordinate difference was `0.00012207031` pixels. The smoke comparison enforces score tolerance `1e-5` and coordinate tolerance `0.01` source pixels. It compares final results; its log does not expose every pre-NMS candidate or the retained original candidate indices. The compare mode executes both paths and is numerical validation evidence, not the optimized path's standalone frame-time benchmark.
 
 The observed float differences can affect confidence threshold inclusion, score ordering or NMS IoU decisions for values sufficiently close to a boundary. Therefore the evidence supports agreement on these tested frames within the stated numeric tolerances, not universal bitwise equivalence or a guarantee of identical detections for every possible input. Retain the float path as a reference. Anchors/labels and the BT.601 matrix assumption remain subject to the earlier limitations.
 
@@ -153,14 +148,14 @@ The reviewed `Int8DecodeTests.cs` covers 20 random seeds across three different 
 ## Reproduce metadata evidence
 
 ```sh
-sha256sum $MODEL_PATH
-strings $MODEL_PATH | head -n 12
-python3 tools/model-probe/extract_metadata.py $MODEL_PATH --output /tmp/rknnsharp-20261029/model/embedded-metadata.json
+sha256sum "$MODEL_PATH"
+strings "$MODEL_PATH" | head -n 12
+python3 tools/model-probe/extract_metadata.py "$MODEL_PATH" --output "$METADATA_OUTPUT"
 ```
 
-The extraction script uses `ast.literal_eval` on embedded metadata, never executes model contents, and refuses to overwrite an existing evidence output. Use a fresh output name when repeating it. Embedded metadata extraction is not a supported RKNN API and does not replace runtime query. The first evidence file was produced on the board by the same read-only extraction algorithm in an inline Python command.
+Set `METADATA_OUTPUT` to a fresh output file path before running the command. The extraction script uses `ast.literal_eval` on embedded metadata, never executes model contents, and refuses to overwrite an existing evidence output. Use a fresh output name when repeating it. Embedded metadata extraction is not a supported RKNN API and does not replace runtime query. The first evidence file was produced on the board by the same read-only extraction algorithm in an inline Python command.
 
-The exact checked-in script was copied to `/tmp/rknnsharp-20261029/model/extract_metadata.py` and run with board `python3`, producing `extracted-model-contract.json`. Actual-model SHA-256/size/head-shape assertions passed; attempting to extract the script file itself correctly raised `ValueError` for unrecognized metadata. Both checks exited 0. Local Windows Python was not available in PATH; no installation was performed. These checks cover evidence extraction, not neural-network numerical correctness.
+The checked-in script was run on the test board with `python3`. Actual-model SHA-256/size/head-shape assertions passed; attempting to extract the script file itself correctly raised `ValueError` for unrecognized metadata. Both checks exited 0. These historical checks cover evidence extraction, not neural-network numerical correctness.
 
 Official sources checked: [v1.5.0 decode source](https://github.com/rockchip-linux/rknpu2/blob/v1.5.0/examples/rknn_yolov5_demo/src/postprocess.cc), [current Model Zoo output-layout explanation](https://github.com/airockchip/rknn_model_zoo/tree/main/examples/yolov5), [conversion normalization configuration](https://github.com/airockchip/rknn_model_zoo/blob/main/examples/yolov5/python/convert.py). The cited decode source has an Apache-2.0 header; that does not establish the supplied binary's weight license. Obtain the original model/exporter metadata and license before redistributing weights.
 
