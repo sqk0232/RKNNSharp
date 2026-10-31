@@ -2,7 +2,7 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式记录版本变更。
 
-## [0.2.0] - 未发布
+## [0.2.0] - 2026-10-31
 
 ### Added
 
@@ -32,7 +32,13 @@
 - `CpuMask` 为 `ulong`, 仅表示 CPU0–63. `FromCpus` 对负数或大于 1023 的编号抛参数异常, 对 64–1023 明确抛 `NotSupportedException`; 容量发现遇到无法表示的最大容量 CPU 时也明确失败, 不截断位移.
 
 > **调用线程大小核调度（RK3588）**
-> 0.2.0 降低了每帧的 CPU 后处理开销（同一 CPU 核上 RunInto+DFL 比 0.1.0 快约 9%）。但在默认调度下，推理调用线程大部分时间在等待 NPU，Linux EAS 可能据此把它放到 Cortex-A55 小核上，导致 `rknn_outputs_get`、反量化和后处理变慢；实测不绑核时延迟可能比 0.1.0 高 10–35%，而且各次运行之间波动较大。默认行为保持不变。对延迟敏感的场景，可以通过 `new RknnModel(path, new RknnModelOptions { CallerThreadPlacement = CallerThreadPlacement.HighestCapacityCores() })`，让每次 `Run`/`RunInto`/`Detect` 调用期间临时把调用线程限制在大核上（RK3588 为 CPU4–7），调用结束后自动恢复原亲和性，不影响线程池里的其他任务。设置失败时默认只记一条 Warning 并按原方式继续运行；设 `OnFailure = PlacementFailureMode.Throw` 则改为抛异常。本选项不修改 governor、频率或任何系统设置；如果大核已被其他负载占满，请先评估 CPU 预算。
+> 0.2.0 降低了每帧的 CPU 后处理开销（同一 CPU 核上 RunInto+DFL 比 0.1.0 快约 9%）。但在默认调度下，推理调用线程大部分时间在等待 NPU，Linux EAS 可能据此把它放到 Cortex-A55 小核上，导致 `rknn_outputs_get`、反量化和后处理变慢；实测不绑核时延迟可能比 0.1.0 高 10–35%，而且各次运行之间波动较大。默认行为保持不变。对延迟敏感的场景，可以通过 `new RknnModel(path, new RknnModelOptions { CallerThreadPlacement = CallerThreadPlacement.HighestCapacityCores() })`，让每次 `Run`/`RunInto`/`Detect` 调用期间临时把调用线程限制在 `cpu_capacity` 最高的核上（RK3588 实测为 CPU6–7：其 capacity 为 1024，CPU4–5 为 1003，不在选取范围内），调用结束后自动恢复原亲和性，不影响线程池里的其他任务。设置失败时默认只记一条 Warning 并按原方式继续运行；设 `OnFailure = PlacementFailureMode.Throw` 则改为抛异常。本选项不修改 governor、频率或任何系统设置；如果大核已被其他负载占满，请先评估 CPU 预算。
+>
+> **板端实测（RK3588，librknnrt 2.3.2，YOLOv8n，100 次预热 + 300 次计量，三轮中位数，单位 ms，对比 v0.1.0 默认调度）**
+> - B 组（开启 `HighestCapacityCores()`，发版门槛）：RunInto 均值 17.707 / P95 18.375（v0.1.0 为 18.062 / 18.922，-2.0% / -2.9%）；RunInto+DFL 均值 18.965 / P95 19.635（v0.1.0 为 20.882 / 21.628，-9.2% / -9.2%）；计量窗内 A55 占比 0%，轮间离散 ≤2.2%，调用后亲和性均恢复。
+> - A 组（默认调度，仅记录）：三轮中有两轮正常（RunInto 约 17.7–17.8、RunInto+DFL 约 19.0–19.1），一轮被调度到 A55（A55 占比约 78%，RunInto 20.84 / RunInto+DFL 25.48）。默认路径仍可能偶发落到小核。
+> - D 组（CPU4–7 各有一个 `nice 19` 忙循环）：开启选项 RunInto 约 17.55 / RunInto+DFL 约 18.81，A55 计量占比 0%；默认调度 RunInto 约 21.62 / RunInto+DFL 约 27.65，全部落在 A55。
+> - 限制：该选项只使用 capacity 最高的核（RK3588 上仅 CPU6–7 两个核）。多个推理线程同时开启时会在这两个核上竞争，此场景尚未测试，请按实际并发数评估。
 
 ## [0.1.0] - 2026-10-30
 
@@ -44,5 +50,5 @@
 - 提供 MIT 许可证、使用与部署文档，以及标明测量条件的历史测试数据。
 - 支持 NuGet 打包，包含托管程序集、XML 文档、README、许可证和 Linux ARM64 桥接库；厂商库、驱动、模型及 .NET 运行时由使用方准备。
 
-[0.2.0]: https://github.com/sqk0232/RKNNSharp/compare/v0.1.0...release/0.2.0
+[0.2.0]: https://github.com/sqk0232/RKNNSharp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sqk0232/RKNNSharp/releases/tag/v0.1.0
