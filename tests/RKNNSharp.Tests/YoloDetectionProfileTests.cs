@@ -203,6 +203,20 @@ public sealed class YoloDetectionProfileTests
         Assert.Throws<ArgumentException>(() => new YoloDetectionProfile(config).Decode(outputs, Identity));
     }
 
+    [Theory]
+    [InlineData(0, float.NaN)]
+    [InlineData(1, float.PositiveInfinity)]
+    [InlineData(2, float.NegativeInfinity)]
+    public void NonFiniteTailOfEveryMappedTensorStillFails(int index, float value)
+    {
+        var config = Config();
+        var outputs = Outputs(config);
+        float[] values = outputs[index].Values.ToArray();
+        values[^1] = value;
+        outputs[index] = outputs[index] with { Values = values };
+        Assert.Throws<ArgumentException>(() => new YoloDetectionProfile(config).Decode(outputs, Identity));
+    }
+
     [Fact]
     public void TruncatedBuffersAndInvalidTransformsFail()
     {

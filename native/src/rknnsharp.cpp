@@ -1,5 +1,6 @@
 #include "rknnsharp.h"
 #include "rknn_float_output.h"
+#include "letterbox_fill.h"
 #include <cstddef>
 #include <rknn_api.h>
 #include <im2d.h>
@@ -101,6 +102,42 @@ void tensor(const rknn_tensor_attr& a,rks_tensor& t){
     t.zero_point=a.zp;t.scale=a.scale;t.size_bytes=a.size;t.width_stride=a.w_stride;t.size_with_stride=a.size_with_stride;
     std::memcpy(t.name,a.name,std::min(sizeof(t.name)-1,sizeof(a.name)));
 }
+// Resize overwrites the content rectangle. Fill only the 114 padding. A 1px
+// border grows into that rectangle because this BSP rejects fill origin 1 and
+// extents below 2. Multiple borders share one job when the driver accepts it;
+// rejection falls back to the same synchronous imfill, not a different color.
+static void fill_rgb_letterbox(rga_buffer_t rgb,int width,int height,int left,int top,int rw,int rh,bool& allow_job){
+    rks_letterbox_rect borders[4];int count=0;
+    if(!rks_letterbox_border_rects(width,height,left,top,rw,rh,borders,&count)||count<=0){
+        rga(imfill(rgb,{0,0,width,height},0xff727272,1),"RGA RGB letterbox fill");
+        return;
+    }
+    auto serial=[&]{
+        for(int i=0;i<count;i++){
+            const auto& b=borders[i];
+            rga(imfill(rgb,{b.x,b.y,b.width,b.height},0xff727272,1),"RGA RGB letterbox border fill");
+        }
+    };
+    if(count==1||!allow_job){serial();return;}
+    bool submitted=false;
+    {
+        RgaJob job(false);
+        if(job.handle){
+            IM_STATUS status=IM_STATUS_SUCCESS;
+            for(int i=0;i<count&&(status==IM_STATUS_SUCCESS||status==IM_STATUS_NOERROR);i++){
+                const auto& b=borders[i];
+                status=imfillTask(job.handle,rgb,{b.x,b.y,b.width,b.height},0xff727272);
+            }
+            if(status==IM_STATUS_SUCCESS||status==IM_STATUS_NOERROR){
+                status=imendJob(job.handle,IM_SYNC);
+                if(status==IM_STATUS_SUCCESS||status==IM_STATUS_NOERROR){job.handle=0;submitted=true;}
+            }
+        }
+    }
+    if(submitted)return;
+    allow_job=false;
+    serial();
+}
 }
 struct rks_image {int fd=-1;void* address=MAP_FAILED;size_t length=0;~rks_image(){if(address!=MAP_FAILED)munmap(address,length);if(fd>=0)close(fd);}};
 struct rks_session {
@@ -120,6 +157,7 @@ struct rks_session {
     uint64_t generation=0;
     bool supports_int8=false;
     bool preprocessing_jobs=true;
+    bool letterbox_fill_jobs=true;
     bool prefer_fast_float=false;
     dev_t input_device=0;ino_t input_inode=0;
     ~rks_session(){rgb_rga.reset();signed_rga.reset();if(context){if(signed_input)rknn_destroy_mem(context,signed_input);rknn_destroy(context);}}
@@ -214,10 +252,10 @@ static int run_encoded(rks_session* s,const rks_frame* f,rks_run_info* info,bool
     require(rw<=int(s->w)&&rh<=int(s->h),"letterbox dimensions overflow");
     int left=(int(s->w)-rw)/2,top=(int(s->h)-rh)/2;
     im_rect sr{0,0,int(f->width),int(f->height)},dr{left,top,rw,rh};
-    // Every visible destination pixel is overwritten when no letterbox border
-    // remains. Keep the same validated RGA3 operation for every source format.
+    // No border means every visible pixel is overwritten by resize. The signed
+    // 0x80 fill and XOR stay whole-frame; this only narrows the RGB 114 fill.
     if(left||top||rw!=int(s->w)||rh!=int(s->h))
-        rga(imfill(rgb,{0,0,int(s->w),int(s->h)},0xff727272,1),"RGA RGB letterbox fill");
+        fill_rgb_letterbox(rgb,int(s->w),int(s->h),left,top,rw,rh,s->letterbox_fill_jobs);
     rga(imcheck(src->image,rgb,sr,dr),"RGA resize/CSC validation");
     // RK3588 RGA2 and RGA3 produce different resize/CSC pixels on this BSP.
     // Keep the two verified-equivalent RGA3 engines eligible per operation;
@@ -260,8 +298,10 @@ static int run_encoded(rks_session* s,const rks_frame* f,rks_run_info* info,bool
     auto xor_dst=wrapbuffer_handle(s->signed_rga->handle,int(s->stride*3/2),int(s->h),RK_FORMAT_RGB_565);
     rga(imrop(xor_src,xor_dst,IM_ROP_XOR,1),"RGA INT8 XOR128 (no CPU fallback)");
     auto pre=Clock::now();check(rknn_run(s->context,nullptr),"rknn_run");auto run=Clock::now();
-    std::vector<rknn_output> outs(s->attrs.size());
-    for(unsigned i=0;i<outs.size();i++){
+    rknn_output outs[64]{};
+    unsigned nout=static_cast<unsigned>(s->attrs.size());
+    require(nout<=64,"output count exceeds the session limit");
+    for(unsigned i=0;i<nout;i++){
         // Explicit per-session mode: standard OUTPUT_ATTR NCHW only, never
         // NATIVE_OUTPUT_ATTR NC1HWC2. SDK float remains the exact default.
         bool raw=quantized||(s->prefer_fast_float&&!s->quantized_values[i].empty()&&rks_detail::can_dequantize_int8(s->attrs[i]));
@@ -269,17 +309,18 @@ static int run_encoded(rks_session* s,const rks_frame* f,rks_run_info* info,bool
         outs[i].buf=raw?static_cast<void*>(s->quantized_values[i].data()):direct?static_cast<void*>(direct->values[i]):static_cast<void*>(s->values[i].data());
         outs[i].size=raw?s->quantized_values[i].size():s->attrs[i].n_elems*sizeof(float);
     }
-    int got=rknn_outputs_get(s->context,outs.size(),outs.data(),nullptr);
+    int got=rknn_outputs_get(s->context,nout,outs,nullptr);
     // is_prealloc buffers stay owned here, but get can still hold runtime
     // conversion memory. Release even when get fails, then keep get's error.
-    int released=rknn_outputs_release(s->context,outs.size(),outs.data());
+    // release takes only context, count and the output array.
+    int released=rknn_outputs_release(s->context,nout,outs);
     if(got<0&&released<0)throw std::runtime_error("rknn_outputs_get: "+std::to_string(got)+"; rknn_outputs_release: "+std::to_string(released));
     if(got<0)check(got,"rknn_outputs_get");
     check(released,"rknn_outputs_release");
     // All raw destinations were preallocated by this session: release does
     // not transfer/free ownership. Convert only after successful get/release;
     // failures keep output_encoding invalid and never publish partial results.
-    if(!quantized&&s->prefer_fast_float)for(unsigned i=0;i<outs.size();i++)
+    if(!quantized&&s->prefer_fast_float)for(unsigned i=0;i<nout;i++)
         if(!s->quantized_values[i].empty()&&rks_detail::can_dequantize_int8(s->attrs[i])){
         float* destination=direct?direct->values[i]:s->values[i].data();
         rks_detail::dequantize_int8(s->quantized_values[i].data(),destination,s->attrs[i].n_elems,s->attrs[i].zp,s->attrs[i].scale);

@@ -1,14 +1,19 @@
+using System.Buffers;
+
 namespace RKNNSharp;
 
 /// <summary>显式的 Rockchip DFL 检测解码器. 类别 tensor 已是概率, 无 objectness 或二次 sigmoid.</summary>
 public sealed class YoloDetectionProfile
 {
+    private readonly YoloDetectionHead[] _headsByStride;
     public YoloDetectionConfig Config { get; }
 
     public YoloDetectionProfile(YoloDetectionConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
         Config = config;
+        // 步长唯一且固定为 8/16/32，排序结果与每次 OrderBy 相同，避免每帧分配。
+        _headsByStride = config.Heads.OrderBy(head => head.Stride).ToArray();
     }
 
     /// <summary>验证原生输入约束及映射的标准 NCHW affine INT8 输出, 不依据模型名称推断格式.</summary>
@@ -62,70 +67,129 @@ public sealed class YoloDetectionProfile
         transform.Validate();
         if (outputs.Any(output => output is null)) { throw new ArgumentException("Null output tensor.", nameof(outputs)); }
         ValidateOutputs(outputs.Select(output => output.Info).ToArray());
-        foreach (var output in outputs)
+        Span<int> planes = stackalloc int[3];
+        Span<int> offsets = stackalloc int[3];
+        Span<int> classSlot = stackalloc int[outputs.Count];
+        classSlot.Fill(-1);
+        int total = 0;
+        for (int slot = 0; slot < _headsByStride.Length; slot++)
         {
-            if (output.Values.Length != output.Info.ElementCount)
-            { throw new ArgumentException($"Output {output.Info.Index} float buffer length mismatch.", nameof(outputs)); }
-            foreach (float value in output.Values.Span)
-            {
-                if (!float.IsFinite(value))
-                { throw new ArgumentException($"Output {output.Info.Index} contains non-finite values.", nameof(outputs)); }
-            }
+            YoloDetectionHead head = _headsByStride[slot];
+            int plane = Config.InputWidth / head.Stride * (Config.InputHeight / head.Stride);
+            planes[slot] = plane;
+            offsets[slot] = total;
+            total += plane;
+            classSlot[head.ClassOutputIndex] = slot;
         }
-
-        var candidates = new List<Detection>();
-        // Canonical branch order makes equal-score ties independent of the caller's mapping order.
-        foreach (var head in Config.Heads.OrderBy(head => head.Stride))
+        float[] rentedScores = ArrayPool<float>.Shared.Rent(total);
+        int[] rentedIds = ArrayPool<int>.Shared.Rent(total);
+        try
         {
-            ReadOnlySpan<float> boxes = outputs[head.BoxOutputIndex].Values.Span;
-            ReadOnlySpan<float> classes = outputs[head.ClassOutputIndex].Values.Span;
-            int width = Config.InputWidth / head.Stride, height = Config.InputHeight / head.Stride;
-            int plane = width * height;
-            // Keep SDK dequantized scores verbatim, including small quantization excursions
-            // outside [0,1], as the fixed official Python reference does.
-            for (int cell = 0; cell < plane; cell++)
+            // 按输出下标顺序拒绝 NaN/Inf，与原先逐张量扫描的失败顺序一致。
+            // 类别张量顺带做 argmax：每个元素只读一次。box 与 score-sum 在低分格点或
+            // 官方参考里不会被解码，仍须整块检查。
+            for (int index = 0; index < outputs.Count; index++)
             {
-                int bestClass = 0;
-                float bestScore = classes[cell];
-                for (int classId = 1; classId < Config.ClassCount; classId++)
+                TensorOutput output = outputs[index];
+                ReadOnlySpan<float> values = output.Values.Span;
+                if (values.Length != output.Info.ElementCount)
+                { throw new ArgumentException($"Output {output.Info.Index} float buffer length mismatch.", nameof(outputs)); }
+                int slot = classSlot[index];
+                if (slot < 0)
                 {
-                    float score = classes[classId * plane + cell];
-                    if (score > bestScore) { bestScore = score; bestClass = classId; }
+                    if (FiniteTensor.FirstNonFinite(values) >= 0)
+                    { throw new ArgumentException($"Output {output.Info.Index} contains non-finite values.", nameof(outputs)); }
                 }
-                if (bestScore < Config.ConfidenceThreshold) { continue; }
-                float left = Expectation(boxes, cell, plane, 0);
-                float top = Expectation(boxes, cell, plane, 1);
-                float right = Expectation(boxes, cell, plane, 2);
-                float bottom = Expectation(boxes, cell, plane, 3);
-                float centerX = cell % width + .5f, centerY = cell / width + .5f;
-                var box = new BoundingBox((centerX - left) * head.Stride, (centerY - top) * head.Stride,
-                    (centerX + right) * head.Stride, (centerY + bottom) * head.Stride);
-                if (!box.IsValid) { continue; }
-                if (!Config.MultiLabel) { candidates.Add(new(bestClass, bestScore, box)); }
                 else
                 {
-                    for (int classId = 0; classId < Config.ClassCount; classId++)
+                    ReadBestClass(values, planes[slot], Config.ClassCount, rentedScores.AsSpan(offsets[slot], planes[slot]),
+                        rentedIds.AsSpan(offsets[slot], planes[slot]), output.Info.Index);
+                }
+            }
+
+            var candidates = new List<Detection>();
+            // Canonical branch order makes equal-score ties independent of the caller's mapping order.
+            for (int slot = 0; slot < _headsByStride.Length; slot++)
+            {
+                YoloDetectionHead head = _headsByStride[slot];
+                ReadOnlySpan<float> boxes = outputs[head.BoxOutputIndex].Values.Span;
+                ReadOnlySpan<float> classes = outputs[head.ClassOutputIndex].Values.Span;
+                ReadOnlySpan<float> bestScores = rentedScores.AsSpan(offsets[slot], planes[slot]);
+                ReadOnlySpan<int> bestIds = rentedIds.AsSpan(offsets[slot], planes[slot]);
+                int width = Config.InputWidth / head.Stride, height = Config.InputHeight / head.Stride;
+                int plane = planes[slot];
+                // Keep SDK dequantized scores verbatim, including small quantization excursions
+                // outside [0,1], as the fixed official Python reference does.
+                for (int cell = 0; cell < plane; cell++)
+                {
+                    float bestScore = bestScores[cell];
+                    int bestClass = bestIds[cell];
+                    if (bestScore < Config.ConfidenceThreshold) { continue; }
+                    float left = Expectation(boxes, cell, plane, 0);
+                    float top = Expectation(boxes, cell, plane, 1);
+                    float right = Expectation(boxes, cell, plane, 2);
+                    float bottom = Expectation(boxes, cell, plane, 3);
+                    float centerX = cell % width + .5f, centerY = cell / width + .5f;
+                    var box = new BoundingBox((centerX - left) * head.Stride, (centerY - top) * head.Stride,
+                        (centerX + right) * head.Stride, (centerY + bottom) * head.Stride);
+                    if (!box.IsValid) { continue; }
+                    if (!Config.MultiLabel) { candidates.Add(new(bestClass, bestScore, box)); }
+                    else
                     {
-                        float score = classes[classId * plane + cell];
-                        if (score >= Config.ConfidenceThreshold) { candidates.Add(new(classId, score, box)); }
+                        for (int classId = 0; classId < Config.ClassCount; classId++)
+                        {
+                            float score = classes[classId * plane + cell];
+                            if (score >= Config.ConfidenceThreshold) { candidates.Add(new(classId, score, box)); }
+                        }
                     }
                 }
             }
+            var selected = Suppress(candidates);
+            return Array.AsReadOnly(selected.Select(detection => detection with { Box = transform.Restore(detection.Box) })
+                .Where(detection => detection.Box.IsValid).ToArray());
         }
-        var selected = Suppress(candidates);
-        return Array.AsReadOnly(selected.Select(detection => detection with { Box = transform.Restore(detection.Box) })
-            .Where(detection => detection.Box.IsValid).ToArray());
+        finally
+        {
+            ArrayPool<float>.Shared.Return(rentedScores);
+            ArrayPool<int>.Shared.Return(rentedIds);
+        }
+    }
+
+    private static void ReadBestClass(ReadOnlySpan<float> values, int plane, int classCount, Span<float> bestScores,
+        Span<int> bestIds, uint outputIndex)
+    {
+        for (int classId = 0; classId < classCount; classId++)
+        {
+            ReadOnlySpan<float> planeValues = values.Slice(classId * plane, plane);
+            if (FiniteTensor.FirstNonFinite(planeValues) >= 0)
+            { throw new ArgumentException($"Output {outputIndex} contains non-finite values.", "outputs"); }
+            if (classId == 0)
+            {
+                planeValues.CopyTo(bestScores);
+                bestIds.Fill(0);
+                continue;
+            }
+            for (int cell = 0; cell < plane; cell++)
+            {
+                float score = planeValues[cell];
+                if (score > bestScores[cell]) { bestScores[cell] = score; bestIds[cell] = classId; }
+            }
+        }
     }
 
     private float Expectation(ReadOnlySpan<float> values, int cell, int plane, int side)
     {
         int start = side * Config.RegMax * plane + cell;
-        float maximum = values[start];
-        for (int bin = 1; bin < Config.RegMax; bin++) { maximum = MathF.Max(maximum, values[start + bin * plane]); }
+        int bins = Config.RegMax;
+        // 每个 bin 只做一次跨 plane 读取。MathF.Max 与 Exp 的顺序和原两次扫描相同。
+        Span<float> gathered = stackalloc float[bins];
+        for (int bin = 0; bin < bins; bin++) { gathered[bin] = values[start + bin * plane]; }
+        float maximum = gathered[0];
+        for (int bin = 1; bin < bins; bin++) { maximum = MathF.Max(maximum, gathered[bin]); }
         float sum = 0, weighted = 0;
-        for (int bin = 0; bin < Config.RegMax; bin++)
+        for (int bin = 0; bin < bins; bin++)
         {
-            float weight = MathF.Exp(values[start + bin * plane] - maximum);
+            float weight = MathF.Exp(gathered[bin] - maximum);
             sum += weight;
             weighted += bin * weight;
         }
