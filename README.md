@@ -61,12 +61,12 @@ foreach (Detection detection in result.Detections)
 
 ## NuGet 安装与本地打包
 
-当前包版本为 `0.1.0`，仅面向 **.NET 10** 应用；没有提供 .NET 6/8 资产。核心包包含 `RKNNSharp.dll`、XML 文档、MIT 许可证、本 README，以及 `runtimes/linux-arm64/native/librknnsharp_native.so`。包本身不包含 .NET 运行时、模型、厂商 RKNN/RGA 库、驱动或 GStreamer 采集 adapter。
+当前包版本为 `0.2.0`，仅面向 **.NET 10** 应用；没有提供 .NET 6/8 资产。核心包包含 `RKNNSharp.dll`、XML 文档、MIT 许可证、本 README，以及 `runtimes/linux-arm64/native/librknnsharp_native.so`。包本身不包含 .NET 运行时、模型、厂商 RKNN/RGA 库、驱动或 GStreamer 采集 adapter。
 
 从 nuget.org 安装到自己的应用，再发布 Linux ARM64 输出：
 
 ```sh
-dotnet add path/to/YourApp.csproj package RKNNSharp --version 0.1.0
+dotnet add path/to/YourApp.csproj package RKNNSharp --version 0.2.0
 dotnet publish path/to/YourApp.csproj -c Release -r linux-arm64 --self-contained false
 ```
 
@@ -115,7 +115,7 @@ H.265 输入将 `h264` 改成 `h265`。`auto` 要求 caps 明确声明支持的�
 
 ## 测试数据
 
-下列为 **2026-10-29** 的历史性能测量，尚未按当前版本重新进行同口径基准测试。耗时单位为 **ms**，表中保留三位小数；模型体积使用十进制 **1 MB = 1,000,000 字节**。不同模型、Runtime、版本和输入不能直接混作一次横向性能比较；吞吐的倒数不是单请求延迟。
+下列为 **2026-10-29** 的历史性能测量，待 **0.2.0 板端同口径重测后更新**。耗时单位为 **ms**，表中保留三位小数；模型体积使用十进制 **1 MB = 1,000,000 字节**。不同模型、Runtime、版本和输入不能直接混作一次横向性能比较；吞吐的倒数不是单请求延迟。
 
 ### 模型与输入
 
