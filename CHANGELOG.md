@@ -6,6 +6,7 @@
 
 ### Added
 
+- 新增 `RknnModelOptions`、可选 `CallerThreadPlacement` 与可注入 `ILoggerFactory` 日志. 默认调度与原构造函数行为保持不变.
 - 使用 `static_assert` 固定原生 ABI 结构体大小及关键字段偏移，防止与托管布局漂移。
 - 新增 Windows/Linux 的 .NET 10 托管构建与测试 CI。
 - Smoke 单帧模式新增 `dfl` 参数，支持 `RunInto` 与 `YoloDetectionProfile` 的 DFL 解码路径。
@@ -25,8 +26,13 @@
 
 ### Compatibility
 
-- 原生 ABI 仍为 **2**，公共 API 无变化。
+- 原生 ABI 仍为 **2**，现有公共 API 签名保持兼容，新增可选配置 API。
 - README 性能数值保留 2026-10-29 历史数据，待 0.2.0 板端同口径重测后更新。
+- 板端发布门槛: B 组开启大核选项后, 相较 v0.1.0 延迟变慢不得超过 5%; A 组默认调度结果仅记录并写入发版说明, 不阻塞发布. 本机托管测试不能替代板端测量.
+- `CpuMask` 为 `ulong`, 仅表示 CPU0–63. `FromCpus` 对负数或大于 1023 的编号抛参数异常, 对 64–1023 明确抛 `NotSupportedException`; 容量发现遇到无法表示的最大容量 CPU 时也明确失败, 不截断位移.
+
+> **调用线程大小核调度（RK3588）**
+> 0.2.0 降低了每帧的 CPU 后处理开销（同一 CPU 核上 RunInto+DFL 比 0.1.0 快约 9%）。但在默认调度下，推理调用线程大部分时间在等待 NPU，Linux EAS 可能据此把它放到 Cortex-A55 小核上，导致 `rknn_outputs_get`、反量化和后处理变慢；实测不绑核时延迟可能比 0.1.0 高 10–35%，而且各次运行之间波动较大。默认行为保持不变。对延迟敏感的场景，可以通过 `new RknnModel(path, new RknnModelOptions { CallerThreadPlacement = CallerThreadPlacement.HighestCapacityCores() })`，让每次 `Run`/`RunInto`/`Detect` 调用期间临时把调用线程限制在大核上（RK3588 为 CPU4–7），调用结束后自动恢复原亲和性，不影响线程池里的其他任务。设置失败时默认只记一条 Warning 并按原方式继续运行；设 `OnFailure = PlacementFailureMode.Throw` 则改为抛异常。本选项不修改 governor、频率或任何系统设置；如果大核已被其他负载占满，请先评估 CPU 预算。
 
 ## [0.1.0] - 2026-10-30
 

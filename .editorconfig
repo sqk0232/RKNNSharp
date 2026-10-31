@@ -1,0 +1,6 @@
+root = true
+
+[src/RKNNSharp/**/*.cs]
+dotnet_diagnostic.CA1848.severity = error
+dotnet_diagnostic.CA2254.severity = error
+dotnet_diagnostic.CA1727.severity = warning
