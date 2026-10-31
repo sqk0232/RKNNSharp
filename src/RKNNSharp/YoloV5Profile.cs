@@ -13,6 +13,8 @@ public sealed class YoloV5Profile
     public float ConfidenceThreshold { get; }
     public float NmsThreshold { get; }
     public int MaxDetections { get; }
+    private readonly float _objectnessLogitReject;
+    internal float ObjectnessLogitReject => _objectnessLogitReject;
 
     public YoloV5Profile(int inputWidth, int inputHeight, int classCount,
         IEnumerable<IEnumerable<YoloAnchor>> anchors, float confidenceThreshold = 0.25f,
@@ -38,6 +40,7 @@ public sealed class YoloV5Profile
         }
         InputWidth = inputWidth; InputHeight = inputHeight; ClassCount = classCount;
         ConfidenceThreshold = confidenceThreshold; NmsThreshold = nmsThreshold; MaxDetections = maxDetections;
+        _objectnessLogitReject = RejectLogit(confidenceThreshold);
     }
 
     /// <summary>仅为示例的官方默认 anchors; 未从所提供模型恢复. 调用方须确认自己的模型配置.</summary>
@@ -95,10 +98,9 @@ public sealed class YoloV5Profile
             var output = outputs[head];
             var values = output.Values.Span;
             if (values.Length != output.Info.ElementCount) { throw new ArgumentException($"Head {head} float buffer length mismatch."); }
-            foreach (float value in values)
-            {
-                if (!float.IsFinite(value)) { throw new ArgumentException($"Head {head} contains non-finite logits."); }
-            }
+            // objectness 门控不会读取大部分 logit。不能并进解码循环，否则被跳过的 NaN/Inf 会漏检。
+            // 向量化扫描仍按元素顺序失败，异常与逐元素 float.IsFinite 相同。
+            if (FiniteTensor.FirstNonFinite(values) >= 0) { throw new ArgumentException($"Head {head} contains non-finite logits."); }
             int stride = 8 << head, gridWidth = InputWidth / stride, gridHeight = InputHeight / stride;
             int plane = gridWidth * gridHeight, attributes = 5 + ClassCount;
             for (int anchorIndex = 0; anchorIndex < 3; anchorIndex++)
@@ -107,7 +109,11 @@ public sealed class YoloV5Profile
                 var anchor = _anchors[head][anchorIndex];
                 for (int cell = 0; cell < plane; cell++)
                 {
-                    float objectness = Sigmoid(values[start + 4 * plane + cell]);
+                    float objectLogit = values[start + 4 * plane + cell];
+                    // log(threshold)-2 处的 Sigmoid 已低于阈值。单调前提下更小的 logit 不可能过阈值，
+                    // 因此跳过 Exp。阈值附近仍走原来的 Sigmoid，置信度不变。有限性已在上面整块检查过。
+                    if (objectLogit <= _objectnessLogitReject) { continue; }
+                    float objectness = Sigmoid(objectLogit);
                     if (objectness < ConfidenceThreshold) { continue; }
                     int classId = 0;
                     float bestClass = values[start + 5 * plane + cell];
@@ -223,6 +229,18 @@ public sealed class YoloV5Profile
             }
             return true;
         }
+    }
+
+    private static float RejectLogit(float threshold)
+    {
+        // 留出 2 个自然对数单位，使快速拒绝远离比较边界。再确认该点的实际 Sigmoid。
+        float ceiling = MathF.Log(threshold) - 2f;
+        for (int step = 0; step < 128 && float.IsFinite(ceiling); step++)
+        {
+            if (Sigmoid(ceiling) < threshold) { return ceiling; }
+            ceiling = MathF.BitDecrement(ceiling);
+        }
+        return float.NegativeInfinity;
     }
 
     internal static float Sigmoid(float value)
