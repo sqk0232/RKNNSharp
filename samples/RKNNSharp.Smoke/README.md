@@ -7,14 +7,15 @@ Linux ARM64 RK3588 的采集与推理示例。主机上可运行 `--help`，实�
 ```sh
 ./RKNNSharp.Smoke --help
 ./RKNNSharp.Smoke "$MODEL_PATH" --single-frame --file "$VIDEO_PATH" h264 "$COLOR_SPACE"
+./RKNNSharp.Smoke "$MODEL_PATH" --single-frame --file "$VIDEO_PATH" h264 "$COLOR_SPACE" dfl
 ./RKNNSharp.Smoke "$MODEL_PATH" --single-frame --rtsp-file "$RTSP_URL_FILE" h264 "$COLOR_SPACE"
 ```
 
-变量由调用者设置为板端文件路径和真实色域；不要把完整 RTSP URL 放到命令行。私有文件仅由进程读取，内容为单行完整 URL。单帧入口位于 [SingleFrameSample.cs](SingleFrameSample.cs)，使用实际公开 API：创建 `RknnModel` → 校验 YOLOv5 profile → 采集 → 借用 `DmaFrame` → `Detect` → 输出独立检测结果 → `finally` 释放 sample → 释放 capture/model。
+变量由调用者设置为板端文件路径和真实色域；不要把完整 RTSP URL 放到命令行。私有文件仅由进程读取，内容为单行完整 URL。单帧入口位于 [SingleFrameSample.cs](SingleFrameSample.cs)，使用实际公开 API：创建 `RknnModel` → 校验 profile → 采集 → 借用 `DmaFrame` → 推理 → 输出独立检测结果 → `finally` 释放 sample → 释放 capture/model。
 
-样例采用 `YoloV5Profile.CreateOfficial640Example()` 的官方640 anchors，只有输入输出属性符合还不足以证明 anchors/类别语义正确；须确认自己的模型契约，其他模型使用自己的 profile。单帧不绘框或显示，不保存像素。输出一行 JSON，包含 PTS、尺寸、检测和阶段耗时。按输入节拍读取第一个可用帧，不是低延迟相机应用模板。
+默认 `v5` 采用 `YoloV5Profile.CreateOfficial640Example()` 的官方 640 anchors，并调用 `Detect`。末位参数 `dfl` 改走 `RunInto` 与 `YoloDetectionProfile.Decode`，契约固定为文档中的 640×640、80 类、regMax 16、stride 8/16/32、box/class/score-sum 九输出示例，不按模型文件名识别。只有输入输出属性符合还不足以证明 anchors、类别或 head 索引正确；须确认自己的模型契约。单帧不绘框或显示，不保存像素。输出一行 JSON，包含 decoder、PTS、尺寸、检测和阶段耗时。按输入节拍读取第一个可用帧，不是低延迟相机应用模板。
 
-`--single-frame` 接受 4 至 6 个参数（不含程序名）：`MODEL --single-frame SOURCE_MODE SOURCE_FILE [codec=h264] [colorspace=auto]`。`SOURCE_MODE` 只允许 `--file` 或 `--rtsp-file`；codec 为 h264/h265；colorspace 为 auto/601limit/601full/709limit。auto 仅接受 caps 明确声明的支持组合，不按分辨率猜测色域。
+`--single-frame` 接受 4 至 7 个参数（不含程序名）：`MODEL --single-frame SOURCE_MODE SOURCE_FILE [codec=h264] [colorspace=auto] [decoder=v5|dfl]`。`SOURCE_MODE` 只允许 `--file` 或 `--rtsp-file`；codec 为 h264/h265；colorspace 为 auto/601limit/601full/709limit。要写 `dfl` 或显式 `v5`，必须先给出 codec 和 colorspace。auto 仅接受 caps 明确声明的支持组合，不按分辨率猜测色域。
 
 ## 有限帧诊断
 

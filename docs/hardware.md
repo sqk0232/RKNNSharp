@@ -47,7 +47,7 @@ BSP必须提供本实现使用的RGA3、NPU和`/dev/dma_heap/system-uncached-dma
 
 ## 支持的模型与缓冲契约
 
-`native/include/rknnsharp.h` 是 C ABI，`rks_abi_version()` 为 **2**。ABI 2 增加 raw INT8 借用输出和显式 core mask；结构体布局保持不变。AArch64 实测结构体大小：frame 48、tensor 364、run_info 56、rect 16 字节。所有字段自然对齐，托管调用方必须检查 ABI，拒绝缺少新导出的旧库。
+`native/include/rknnsharp.h` 是 C ABI，`rks_abi_version()` 为 **2**。ABI 2 增加 raw INT8 借用输出和显式 core mask；结构体布局保持不变。AArch64 实测结构体大小：frame 48、tensor 364、run_info 56、rect 16 字节，对应 `rks_frame`、`rks_tensor`、`rks_run_info`、`rks_rect`。`rknnsharp.cpp` 与硬件 smoke 用 `static_assert` 固定这四项；托管测试对 `DmaFrame`、`NativeTensor`、`NativeRunInfo`、`NativeRect` 断言同一组大小。所有字段自然对齐，托管调用方必须检查 ABI，拒绝缺少新导出的旧库。
 
 本版只支持一个静态 batch=1 的 NHWC RGB 三通道原生输入，类型 INT8、affine zero point=-128、scale 必须精确等于 `float(1/255)`。输入 width stride 必须为 16 像素的倍数，allocation size 必须等于 stride×height×3，无额外隐藏布局。实际模型为 `[1,640,640,3]`、stride=640、size=1228800。此 profile 对应 RGB、mean=0、std=255 的模型契约；量化属性相同不代表其他模型的颜色或训练预处理也相同。
 

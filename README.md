@@ -103,6 +103,12 @@ read -r -p '来源色域 auto/601limit/601full/709limit: ' COLOR_SPACE
 "$PUBLISH_DIR/RKNNSharp.Smoke" "$MODEL_PATH" --single-frame --file "$VIDEO_PATH" h264 "$COLOR_SPACE"
 ```
 
+默认单帧走 YOLOv5 `Detect`。已确认模型符合 [DFL 九输出示例](https://github.com/sqk0232/RKNNSharp/blob/main/docs/yolo-detection.md) 时，在色域后追加 `dfl`，改为 `RunInto` 加 `YoloDetectionProfile`：
+
+```sh
+"$PUBLISH_DIR/RKNNSharp.Smoke" "$MODEL_PATH" --single-frame --file "$VIDEO_PATH" h264 "$COLOR_SPACE" dfl
+```
+
 H.265 输入将 `h264` 改成 `h265`。`auto` 要求 caps 明确声明支持的色域；否则由调用方确认矩阵和范围。RTSP 使用 `--rtsp-file` 替换 `--file`，文件内容为完整私有 URL；不要把 URL 或凭据写进命令行、日志或仓库。
 
 样例输出单帧 PTS、检测结果和阶段耗时，不保存或显示图像。完整参数、退出码、有限帧诊断及流水线入口见[样例说明](https://github.com/sqk0232/RKNNSharp/blob/main/samples/RKNNSharp.Smoke/README.md)；完整部署步骤见[整合说明](https://github.com/sqk0232/RKNNSharp/blob/main/docs/integration.md#从源码使用)。
