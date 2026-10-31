@@ -2,7 +2,7 @@
   <PropertyGroup>
     <PackageId>RKNNSharp</PackageId>
     <Version>0.2.0</Version>
-    <PackageReleaseNotes>https://github.com/sqk0232/RKNNSharp/blob/release/0.2.0/CHANGELOG.md</PackageReleaseNotes>
+    <PackageReleaseNotes>https://github.com/sqk0232/RKNNSharp/blob/main/CHANGELOG.md</PackageReleaseNotes>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
