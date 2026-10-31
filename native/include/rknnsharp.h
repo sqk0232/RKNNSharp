@@ -101,9 +101,12 @@ RKS_API int rks_borrow_output_int8(rks_session*, uint32_t index,
    become a nearest in-bounds 2x2 (or 2xN/Nx2) hardware marker. Small fills whose
    resulting origin is exactly 1 extend left/up to 0 to satisfy this BSP.
    NV12 boxes require
-   even coordinates and extents; other hardware limits fail explicitly. */
+   even coordinates and extents. The color is RGB; on NV12 it is converted
+   with the frame's explicit color space. Other hardware limits fail explicitly. */
 RKS_API int rks_draw_rectangles(const rks_frame*, const rks_rect*, uint32_t count, uint32_t rgba, int32_t thickness);
-/* Synchronous hardware copy/CSC into caller-owned DMA buffer. No resize. */
+/* Synchronous hardware copy/CSC into caller-owned DMA buffer. No resize.
+   Format conversion uses the verified RGA3 cores. Same-format copies do not
+   request a core. */
 RKS_API int rks_copy_frame(const rks_frame* source, const rks_frame* destination);
 /* Allocates uncacheable DMA32 storage, never maps pixels to CPU. out_frame.fd
    is borrowed from owner. Caller must serialize release with all frame uses,
