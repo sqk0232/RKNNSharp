@@ -90,6 +90,10 @@ std::unique_ptr<Imported> import(const rks_frame& f){
 }
 int yuv_to_rgb(uint32_t c){return c==RKS_BT601_FULL?IM_YUV_TO_RGB_BT601_FULL:c==RKS_BT709_LIMIT?IM_YUV_TO_RGB_BT709_LIMIT:IM_YUV_TO_RGB_BT601_LIMIT;}
 int rgb_to_yuv(uint32_t c){return c==RKS_BT601_FULL?IM_RGB_TO_YUV_BT601_FULL:c==RKS_BT709_LIMIT?IM_RGB_TO_YUV_BT709_LIMIT:IM_RGB_TO_YUV_BT601_LIMIT;}
+// librga 1.10 color-fill reads the destination full-range color space
+// (IM_YUV_*_RANGE). The legacy RGB_TO_YUV direction bits used by improcess
+// do not select the fill matrix and leave BT.601 limited as the default.
+int nv12_fill_color_space(uint32_t c){return c==RKS_BT601_FULL?IM_YUV_BT601_FULL_RANGE:c==RKS_BT709_LIMIT?IM_YUV_BT709_LIMIT_RANGE:IM_YUV_BT601_LIMIT_RANGE;}
 void tensor(const rknn_tensor_attr& a,rks_tensor& t){
     t={};t.index=a.index;t.n_dims=a.n_dims;
     for(unsigned i=0;i<std::min(16u,a.n_dims);i++)t.dims[i]=a.dims[i];
@@ -142,9 +146,16 @@ int rks_create(const char* path,rks_session** result){return guard([&]{
     require(bytes<=UINT32_MAX&&a.size_with_stride>=bytes,"native input allocation/stride mismatch");
     require(s->stride%16==0&&a.size_with_stride==bytes,"native RGB input must have 16-pixel aligned stride and no hidden padding");
     rks_image* owner=nullptr;rks_frame allocated{};
-    require(rks_allocate_image(s->stride,s->h,RKS_RGB888,&owner,&allocated)==0,"RGB DMA32 allocation failed");s->rgb_owner.reset(owner);
+    auto allocate_dma=[&](const char* what){
+        owner=nullptr;
+        if(rks_allocate_image(s->stride,s->h,RKS_RGB888,&owner,&allocated)!=0){
+            std::string cause=error;
+            throw std::runtime_error(std::string(what)+": "+(cause.empty()?"unknown DMA failure":cause));
+        }
+    };
+    allocate_dma("RGB DMA32 allocation failed");s->rgb_owner.reset(owner);
     s->rgb_rga=std::make_unique<Imported>(allocated.fd,allocated.size_bytes,s->w,s->h,s->stride,s->h,RK_FORMAT_RGB_888);
-    owner=nullptr;require(rks_allocate_image(s->stride,s->h,RKS_RGB888,&owner,&allocated)==0,"INT8 DMA32 allocation failed");s->signed_owner.reset(owner);
+    allocate_dma("INT8 DMA32 allocation failed");s->signed_owner.reset(owner);
     // Runtime 1.5.2 requires a non-null virtual address at set_io_mem even in
     // pass-through mode. Establish VA only; never dereference image pixels.
     owner->length=allocated.size_bytes;owner->address=mmap(nullptr,owner->length,PROT_READ|PROT_WRITE,MAP_SHARED,owner->fd,0);
@@ -229,12 +240,13 @@ static int run_encoded(rks_session* s,const rks_frame* f,rks_run_info* info,bool
             if(status==IM_STATUS_SUCCESS||status==IM_STATUS_NOERROR){
                 status=imendJob(job.handle,IM_SYNC);
                 if(status==IM_STATUS_SUCCESS||status==IM_STATUS_NOERROR){job.handle=0;prepared=true;}
-                else if(status!=IM_STATUS_NOT_SUPPORTED)rga(status,"RGA independent preprocessing job");
             }
         }
-        // A rejected/unsupported job is cancelled by the local guard before
-        // using the original synchronous hardware path. Cache only this session
-        // capability decision, never an external fd or frame allocation.
+        // Optional batching of the same resize/CSC and INT8 fill. Any job
+        // failure, including errors other than NOT_SUPPORTED, is cancelled by
+        // the local guard and this frame uses the synchronous path below.
+        // Cache only this session capability decision, never an external fd
+        // or frame allocation.
         if(!prepared)s->preprocessing_jobs=false;
     }
     if(!prepared){
@@ -257,8 +269,13 @@ static int run_encoded(rks_session* s,const rks_frame* f,rks_run_info* info,bool
         outs[i].buf=raw?static_cast<void*>(s->quantized_values[i].data()):direct?static_cast<void*>(direct->values[i]):static_cast<void*>(s->values[i].data());
         outs[i].size=raw?s->quantized_values[i].size():s->attrs[i].n_elems*sizeof(float);
     }
-    check(rknn_outputs_get(s->context,outs.size(),outs.data(),nullptr),"rknn_outputs_get");
-    check(rknn_outputs_release(s->context,outs.size(),outs.data()),"rknn_outputs_release");
+    int got=rknn_outputs_get(s->context,outs.size(),outs.data(),nullptr);
+    // is_prealloc buffers stay owned here, but get can still hold runtime
+    // conversion memory. Release even when get fails, then keep get's error.
+    int released=rknn_outputs_release(s->context,outs.size(),outs.data());
+    if(got<0&&released<0)throw std::runtime_error("rknn_outputs_get: "+std::to_string(got)+"; rknn_outputs_release: "+std::to_string(released));
+    if(got<0)check(got,"rknn_outputs_get");
+    check(released,"rknn_outputs_release");
     // All raw destinations were preallocated by this session: release does
     // not transfer/free ownership. Convert only after successful get/release;
     // failures keep output_encoding invalid and never publish partial results.
@@ -296,6 +313,9 @@ int rks_draw_rectangles(const rks_frame* f,const rks_rect* rects,uint32_t n,uint
                 require(thickness%2==0,"NV12 border thickness must be even");
         }
     }
+    // Rectangle color is RGB. On NV12, librga converts it with the destination
+    // color space; leaving the mode unset uses BT.601 limited for every frame.
+    if(f->format==RKS_NV12)dst->image.color_space_mode=nv12_fill_color_space(f->color_space);
     // Same-color fills commute, including overlapping borders. Keep jobs bounded
     // to eight rectangles (at most 32 edge tasks); wait before reusing the DMA.
     for(unsigned first=0;first<n;first+=8){
@@ -332,7 +352,13 @@ int rks_copy_frame(const rks_frame* a,const rks_frame* b){return guard([&]{
         require(a->color_space==b->color_space,"NV12 copy must preserve color metadata");
     im_rect full{0,0,int(a->width),int(a->height)};
     rga(imcheck(src->image,dst->image,full,full),"RGA copy validation");
-    rga(improcess(src->image,dst->image,{},full,full,{},IM_SYNC),"RGA copy/CSC");
+    // RGA2 and RGA3 CSC pixels differ on this BSP. Pin the verified RGA3 cores
+    // for format conversion only; a same-format copy has no matrix and may use
+    // strides that RGA3 rejects, so it keeps the driver scheduler.
+    im_opt_t copy{};
+    const bool format_conversion=a->format!=b->format;
+    if(format_conversion)copy.core=IM_SCHEDULER_RGA3_CORE0|IM_SCHEDULER_RGA3_CORE1;
+    rga(improcess(src->image,dst->image,{},full,full,{},-1,nullptr,format_conversion?&copy:nullptr,IM_SYNC),format_conversion?"RGA3 copy/CSC":"RGA copy");
 });}
 int rks_allocate_image(uint32_t w,uint32_t h,uint32_t fmt,rks_image** result,rks_frame* frame){return guard([&]{
     require(result&&frame,"null image allocation output");*result=nullptr;*frame={};
