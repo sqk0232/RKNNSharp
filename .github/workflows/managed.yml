@@ -32,5 +32,11 @@ jobs:
       # the package requires librknnsharp_native.so from an RK3588 SDK build.
       - name: Build
         run: dotnet build RKNNSharp.slnx -c Release
+      - name: Check structured logging
+        shell: pwsh
+        run: ./scripts/check-logging.ps1
+      - name: Check shell logging guard
+        if: runner.os == 'Linux'
+        run: sh ./scripts/check-logging.sh
       - name: Test
         run: dotnet test tests/RKNNSharp.Tests/RKNNSharp.Tests.csproj -c Release --no-build

@@ -1,4 +1,5 @@
 #include <cstddef>
+#include "rknnsharp.h"
 #include <rknn_api.h>
 #include <im2d.h>
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <sys/mman.h>
 
 using Clock=std::chrono::steady_clock;
 static double elapsed(Clock::time_point start){return std::chrono::duration<double,std::milli>(Clock::now()-start).count();}
@@ -28,19 +30,31 @@ struct Context {
     rknn_context context=0;
     rknn_tensor_mem* input=nullptr;
     rga_buffer_handle_t handle=0;
+    rks_image* input_owner=nullptr;
+    rks_frame input_frame{};
+    void* input_address=MAP_FAILED;
     int mask=0;
     std::vector<uint32_t> output_sizes;
-    ~Context(){if(handle)releasebuffer_handle(handle);if(input)rknn_destroy_mem(context,input);if(context)rknn_destroy(context);}
+    ~Context(){if(handle)releasebuffer_handle(handle);if(input)rknn_destroy_mem(context,input);if(input_address!=MAP_FAILED)munmap(input_address,input_frame.size_bytes);rks_release_image(input_owner);if(context)rknn_destroy(context);}
     void initialize(const char* model,int selected){
         mask=selected;check(rknn_init(&context,const_cast<char*>(model),0,0,nullptr),"init");
         check(rknn_set_core_mask(context,static_cast<rknn_core_mask>(mask)),"set core mask");
         rknn_tensor_attr attr{};check(rknn_query(context,RKNN_QUERY_NATIVE_INPUT_ATTR,&attr,sizeof(attr)),"query input");
         if(attr.n_dims!=4||attr.fmt!=RKNN_TENSOR_NHWC||attr.type!=RKNN_TENSOR_INT8||attr.dims[0]!=1||attr.dims[3]!=3||attr.zp!=-128||attr.scale!=1.f/255.f)
             throw std::runtime_error("benchmark requires the validated RGB signed-byte input profile");
-        input=rknn_create_mem(context,attr.size_with_stride);if(!input)throw std::runtime_error("allocate input");
+        // Color fill is RGA2-only on RK3588 and requires DMA32 storage. The
+        // SDK default allocator does not promise that address range.
+        check(rks_allocate_image(attr.dims[2],attr.dims[1],RKS_RGB888,&input_owner,&input_frame),"allocate DMA32 input");
+        if(input_frame.row_stride_bytes!=(attr.w_stride?attr.w_stride:attr.dims[2])*3||input_frame.size_bytes<attr.size_with_stride)
+            throw std::runtime_error("DMA32 input stride/size mismatch");
+        input_address=mmap(nullptr,input_frame.size_bytes,PROT_READ|PROT_WRITE,MAP_SHARED,input_frame.fd,0);
+        if(input_address==MAP_FAILED)throw std::runtime_error("map external input");
+        input=rknn_create_mem_from_fd(context,input_frame.fd,input_address,input_frame.size_bytes,0);
+        if(!input)throw std::runtime_error("import DMA32 input");
         handle=importbuffer_fd(input->fd,int(input->size));if(!handle)throw std::runtime_error("import RGA input");
         auto image=wrapbuffer_handle(handle,attr.dims[2],attr.dims[1],RK_FORMAT_RGB_888,
                                      attr.w_stride?attr.w_stride:attr.dims[2],attr.dims[1]);
+        std::printf("signed RGB input DMA32 fd=%d bytes=%u width=%u height=%u stride=%u zp=%d scale=%.9g\n",input->fd,input->size,attr.dims[2],attr.dims[1],attr.w_stride,attr.zp,attr.scale);
         // Pixel generation is entirely hardware. 114 -> signed byte -14 = 0xf2.
         if(imfill(image,{0,0,int(attr.dims[2]),int(attr.dims[1])},0xfff2f2f2,1)!=IM_STATUS_SUCCESS)
             throw std::runtime_error("RGA signed input fill");

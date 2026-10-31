@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace RKNNSharp;
 
@@ -10,6 +12,9 @@ public sealed class RknnModel : IDisposable
     private readonly object _gate = new();
     private readonly SessionHandle _handle;
     private readonly bool _supportsDirectFloat;
+    private readonly ILogger _logger;
+    private readonly PlacementState _placementState;
+    public CallerThreadPlacement? CallerThreadPlacement { get; }
     public IReadOnlyList<TensorInfo> Inputs { get; }
     public IReadOnlyList<TensorInfo> Outputs { get; }
     public string RuntimeVersions { get; }
@@ -32,10 +37,27 @@ public sealed class RknnModel : IDisposable
 
     /// <summary>加载前可选校验模型SHA256, 并显式选择浮点输出模式. 显式快速模式需要支持配置导出的原生库.</summary>
     public unsafe RknnModel(string modelPath, NpuCoreMask coreMask, string? expectedModelSha256, FloatOutputMode outputMode)
+        : this(modelPath, coreMask, expectedModelSha256, outputMode, null, null) { }
+
+    /// <summary>使用可选调用线程调度与日志配置创建会话.</summary>
+    public RknnModel(string modelPath, RknnModelOptions options)
+        : this(modelPath, (options ?? throw new ArgumentNullException(nameof(options))).CoreMask,
+            options.ExpectedModelSha256, options.OutputMode, options.CallerThreadPlacement, options.LoggerFactory) { }
+
+    private unsafe RknnModel(string modelPath, NpuCoreMask coreMask, string? expectedModelSha256,
+        FloatOutputMode outputMode, CallerThreadPlacement? placement, ILoggerFactory? loggerFactory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelPath);
         if (!Enum.IsDefined(coreMask)) { throw new ArgumentOutOfRangeException(nameof(coreMask)); }
         if (!Enum.IsDefined(outputMode)) { throw new ArgumentOutOfRangeException(nameof(outputMode)); }
+        if (placement is not null)
+        {
+            bool linux = OperatingSystem.IsLinux();
+            placement.Validate(linux, linux && placement.CpuMask.HasValue ? File.ReadAllText("/sys/devices/system/cpu/online") : null);
+        }
+        CallerThreadPlacement = placement;
+        _logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger<RknnModel>();
+        _placementState = new PlacementState(placement, _logger);
         ModelFileIntegrity.Verify(modelPath, expectedModelSha256);
         if (!File.Exists(modelPath)) { throw new FileNotFoundException("RKNN model was not found.", modelPath); }
         NativeMethods.EnsurePlatform();
@@ -61,6 +83,12 @@ public sealed class RknnModel : IDisposable
             byte* versions = stackalloc byte[2048];
             NativeMethods.Check(NativeMethods.rks_get_versions(_handle, versions, 2048));
             RuntimeVersions = Encoding.UTF8.GetString(MemoryMarshalBytes(versions, 2048));
+            if (_logger.IsEnabled(LogLevel.Information))
+            {
+                Log.SessionCreated(_logger, coreMask, outputMode);
+                if (placement is not null) { Log.PlacementEnabled(_logger, placement.CpuMask, placement.UtilClampMin); }
+            }
+            if (_logger.IsEnabled(LogLevel.Debug)) { Log.DirectFloat(_logger, _supportsDirectFloat); }
         }
         catch { _handle.Dispose(); throw; }
     }
@@ -84,6 +112,8 @@ public sealed class RknnModel : IDisposable
         return Array.AsReadOnly(tensors);
     }
 
+    private PlacementScope EnterPlacement() => PlacementScope.Enter(_placementState);
+
     /// <summary>借用输入直至方法返回. 调用方必须同步生产者, 并防止 FD/sample 关闭、复用或写入.</summary>
     public unsafe InferenceResult Run(DmaFrame frame)
     {
@@ -98,6 +128,7 @@ public sealed class RknnModel : IDisposable
     {
         ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
         if (_supportsDirectFloat) { return RunDirectFloat(frame); }
+        using var placement = EnterPlacement();
         NativeMethods.Check(NativeMethods.rks_run(_handle, in frame, out var info));
         var transform = NativeLetterboxGeometry.Create(frame, Inputs[0], in info);
         long managedCopyStart = Stopwatch.GetTimestamp();
@@ -118,6 +149,7 @@ public sealed class RknnModel : IDisposable
 
     private unsafe InferenceResult RunDirectFloat(DmaFrame frame)
     {
+        using var placement = EnterPlacement();
         long managedStart = Stopwatch.GetTimestamp();
         var values = new TensorOutput[Outputs.Count];
         var pins = new GCHandle[Outputs.Count];
@@ -174,6 +206,7 @@ public sealed class RknnModel : IDisposable
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+            using var placement = EnterPlacement();
             long managedStart = Stopwatch.GetTimestamp();
             var pinned = new PinnedRunOutputs(Outputs, outputBuffers);
             double managedMs = Stopwatch.GetElapsedTime(managedStart).TotalMilliseconds;
@@ -233,6 +266,7 @@ public sealed class RknnModel : IDisposable
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+            using var placement = EnterPlacement();
             bool added = false;
             try
             {

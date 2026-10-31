@@ -155,7 +155,8 @@ public sealed class YoloDetectionProfile
         }
     }
 
-    private static void ReadBestClass(ReadOnlySpan<float> values, int plane, int classCount, Span<float> bestScores,
+    private static void ReadBestClass(
+        ReadOnlySpan<float> values, int plane, int classCount, Span<float> bestScores,
         Span<int> bestIds, uint outputIndex)
     {
         for (int classId = 0; classId < classCount; classId++)
