@@ -21,6 +21,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+// C# sequential layouts, in this order: DmaFrame, NativeTensor, NativeRunInfo, NativeRect.
+// AArch64 LP64 natural alignment is 48/364/56/16; the same widths hold on x86_64.
+static_assert(sizeof(rks_frame) == 48, "rks_frame ABI size drifted from DmaFrame");
+static_assert(sizeof(rks_tensor) == 364, "rks_tensor ABI size drifted from NativeTensor");
+static_assert(sizeof(rks_run_info) == 56, "rks_run_info ABI size drifted from NativeRunInfo");
+static_assert(sizeof(rks_rect) == 16, "rks_rect ABI size drifted from NativeRect");
+static_assert(offsetof(rks_frame, size_bytes) == 24, "rks_frame.size_bytes offset drifted from DmaFrame.SizeBytes");
+static_assert(offsetof(rks_run_info, preprocess_ms) == 24, "rks_run_info.preprocess_ms offset drifted from NativeRunInfo.PreprocessMs");
+
 namespace {
 thread_local std::string error;
 using Clock=std::chrono::steady_clock;

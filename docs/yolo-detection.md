@@ -27,6 +27,12 @@ IReadOnlyList<Detection> detections = profile.Decode(raw.Outputs, raw.Transform)
 
 可选 `classNames` 为类别ID顺序的完整标签列表; 省略/空列表不猜标签. 返回值仍为 `Detection.ClassId`, 调用方可用配置的ClassNames查名称. 配置防御复制head/label集合, 不随调用方改数组而变化. 同一模型仍须遵守DMA生产者同步与输入FD生命周期规则.
 
+板端可用 Smoke 单帧参数 `dfl` 跑上面这个九输出示例。它在 codec 与 colorspace 之后，调用 `RunInto` 再 `Decode`，不读取模型文件名；省略时仍是 YOLOv5 `Detect`。
+
+```sh
+"$PUBLISH_DIR/RKNNSharp.Smoke" "$MODEL_PATH" --single-frame --file "$VIDEO_PATH" h264 "$COLOR_SPACE" dfl
+```
+
 ## 支持与拒绝边界
 
 - 原生输入要求仍为单输入、静态batch1、NHWC RGB affineINT8、zeroPoint=-128、scale精确float(1/255), DMA/RGA预处理契约不变. 本层没有放宽native断言.

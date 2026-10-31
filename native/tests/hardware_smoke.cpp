@@ -15,6 +15,11 @@
 #include <vector>
 #include <limits>
 
+static_assert(sizeof(rks_frame) == 48, "rks_frame ABI size drifted from DmaFrame");
+static_assert(sizeof(rks_tensor) == 364, "rks_tensor ABI size drifted from NativeTensor");
+static_assert(sizeof(rks_run_info) == 56, "rks_run_info ABI size drifted from NativeRunInfo");
+static_assert(sizeof(rks_rect) == 16, "rks_rect ABI size drifted from NativeRect");
+
 static int fail(const char* op){std::fprintf(stderr,"%s: %s\n",op,rks_last_error());return 1;}
 static int descriptors(){DIR* d=opendir("/proc/self/fd");if(!d)return -1;int n=0;while(readdir(d))n++;closedir(d);return n;}
 int main(int argc,char** argv){

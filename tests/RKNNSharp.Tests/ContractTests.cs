@@ -8,6 +8,7 @@ public sealed class ContractTests
     [Fact]
     public void NativeLayoutsMatchMeasuredArm64Abi()
     {
+        // Same numbers as native static_assert: rks_frame, rks_tensor, rks_run_info, rks_rect.
         Assert.Equal(48, Marshal.SizeOf<DmaFrame>());
         Assert.Equal(364, Marshal.SizeOf<NativeTensor>());
         Assert.Equal(56, Marshal.SizeOf<NativeRunInfo>());
