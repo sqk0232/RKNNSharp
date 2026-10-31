@@ -26,9 +26,11 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
-      # Hosted runners build and run managed code only. Pack is omitted: the
-      # net10.0 package requires librknnsharp_native.so from an RK3588 SDK build.
+      # Directory.Build.props already selects net10.0. Passing -f on the
+      # solution schedules each referenced project twice in parallel, and the
+      # two writes race (CS2012 on Windows, MSB4018 on Linux). Pack is omitted:
+      # the package requires librknnsharp_native.so from an RK3588 SDK build.
       - name: Build
-        run: dotnet build RKNNSharp.slnx -c Release -f net10.0
+        run: dotnet build RKNNSharp.slnx -c Release
       - name: Test
-        run: dotnet test tests/RKNNSharp.Tests/RKNNSharp.Tests.csproj -c Release -f net10.0 --no-build
+        run: dotnet test tests/RKNNSharp.Tests/RKNNSharp.Tests.csproj -c Release --no-build
