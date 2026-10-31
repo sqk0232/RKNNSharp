@@ -1,6 +1,7 @@
 #include "rknnsharp.h"
 #include "rknn_float_output.h"
 #include "letterbox_fill.h"
+#include "draw_rects.h"
 #include <cstddef>
 #include <rknn_api.h>
 #include <im2d.h>
@@ -363,16 +364,22 @@ int rks_draw_rectangles(const rks_frame* f,const rks_rect* rects,uint32_t n,uint
         RgaJob job;
         for(unsigned i=first;i<std::min(first+8,n);i++){
             const auto& r=rects[i];
-            if(uint64_t(thickness)*2>=uint64_t(std::min(r.width,r.height))){
-                int w=std::max(2,r.width),h=std::max(2,r.height);
-                int x=std::min(r.x,int(f->width)-w),y=std::min(r.y,int(f->height)-h);
-                // librga 1.10.1 rejects a fill origin of exactly one on this
-                // BSP. Extend left/up to zero, preserving the full marker.
-                if(x==1){x=0;++w;}
-                if(y==1){y=0;++h;}
-                rga(imfillTask(job.handle,dst->image,{x,y,w,h},color),"RGA small rectangle fill task");
-            }else{
+            // Preserve librga's rasterization for ordinary borders.
+            // Thin strips and borders close to the image edge can generate
+            // origin 1 or sub-2px intermediate fills on this BSP.
+            const int half=thickness/2;
+            if(thickness>=2&&uint64_t(thickness)*2<uint64_t(std::min(r.width,r.height))
+                &&r.x>half+1&&r.y>half+1
+                &&int64_t(r.x)+r.width+half<int64_t(f->width)-1
+                &&int64_t(r.y)+r.height+half<int64_t(f->height)-1){
                 rga(imrectangleTask(job.handle,dst->image,{r.x,r.y,r.width,r.height},color,thickness),"RGA rectangle task");
+                continue;
+            }
+            rks_letterbox_rect edges[4];int edge_count=0;
+            require(rks_draw_border_rects(f->width,f->height,r.x,r.y,r.width,r.height,thickness,edges,&edge_count),"cannot form hardware drawing rectangles");
+            for(int edge=0;edge<edge_count;edge++){
+                const auto& e=edges[edge];
+                rga(imfillTask(job.handle,dst->image,{e.x,e.y,e.width,e.height},color),"RGA rectangle border fill task");
             }
         }
         job.finish();
