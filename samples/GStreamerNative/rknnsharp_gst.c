@@ -108,6 +108,19 @@ void rkgst_release(rkgst_frame *f) {
     if (f->token) gst_sample_unref((GstSample *)f->token);
     memset(f,0,sizeof(*f));
 }
+static uint32_t explicit_color_space(const GstCaps *caps) {
+    const gchar *value=gst_structure_get_string(gst_caps_get_structure(caps,0),"colorimetry");
+    GstVideoColorimetry color;
+    /* GstVideoInfo replaces invalid/unspecified YUV matrices with a size-based
+     * default. Only the original caps string can establish an explicit matrix. */
+    if (!value || !gst_video_colorimetry_from_string(&color,value)) return 0;
+    if (color.matrix==GST_VIDEO_COLOR_MATRIX_BT601) {
+        if (color.range==GST_VIDEO_COLOR_RANGE_16_235) return 1;
+        if (color.range==GST_VIDEO_COLOR_RANGE_0_255) return 2;
+    } else if (color.matrix==GST_VIDEO_COLOR_MATRIX_BT709 &&
+               color.range==GST_VIDEO_COLOR_RANGE_16_235) return 3;
+    return 0;
+}
 int rkgst_pull(rkgst_capture *c,uint32_t timeout,rkgst_frame *f,char *error,uint32_t size) {
     if (!c || !f) return fail(error,size,"Invalid pull arguments");
     if (f->token) return fail(error,size,"Release the previous frame before pulling");
@@ -154,13 +167,7 @@ int rkgst_pull(rkgst_capture *c,uint32_t timeout,rkgst_frame *f,char *error,uint
     }
     f->struct_size=sizeof(*f); f->width=info.width; f->height=info.height;
     f->format=0x3231564e; f->n_planes=2;
-    if (gst_structure_has_field(gst_caps_get_structure(caps,0),"colorimetry")) {
-        if (info.colorimetry.matrix==GST_VIDEO_COLOR_MATRIX_BT601) {
-            if (info.colorimetry.range==GST_VIDEO_COLOR_RANGE_16_235) f->color_space=1;
-            else if (info.colorimetry.range==GST_VIDEO_COLOR_RANGE_0_255) f->color_space=2;
-        } else if (info.colorimetry.matrix==GST_VIDEO_COLOR_MATRIX_BT709 &&
-                   info.colorimetry.range==GST_VIDEO_COLOR_RANGE_16_235) f->color_space=3;
-    }
+    f->color_space=explicit_color_space(caps);
     f->pts_ns=GST_BUFFER_PTS(buffer); f->dts_ns=GST_BUFFER_DTS(buffer);
     const GstSegment *segment=gst_sample_get_segment(sample);
     f->running_time_ns=segment ? gst_segment_to_running_time(segment,GST_FORMAT_TIME,f->pts_ns) : GST_CLOCK_TIME_NONE;
