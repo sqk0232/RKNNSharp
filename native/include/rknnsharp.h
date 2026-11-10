@@ -71,6 +71,11 @@ RKS_API int rks_set_float_output_mode(rks_session*, uint32_t mode);
    support or incompatible geometry fails, without RGA2/CPU resize fallback.
    RGB channels
    convert to signed bytes by hardware ROP XOR128; native input pass_through=1.
+   Source imports may retain up to 8 DMA-BUF allocations / 64 MiB per session
+   (actual allocation bytes), with close-on-exec duplicated fds. Layout changes,
+   LRU eviction, failed runs and destroy release cached handles before fds.
+   Producer/frame ownership is still borrowed until return. Cached pins may
+   outlive the producer; oversize/unknown sources use temporary imports.
    Outputs are float tensors under the selected mode; CPU may postprocess them.
    A successful run replaces previous output state; a failed run invalidates it. */
 RKS_API int rks_run(rks_session*, const rks_frame*, rks_run_info*);
