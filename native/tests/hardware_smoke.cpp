@@ -1,4 +1,5 @@
 #include "rknnsharp.h"
+#include "hardware_smoke_output.h"
 #include <cstddef>
 #include <rknn_api.h>
 #include <im2d.h>
@@ -48,13 +49,10 @@ int main(int argc,char** argv){
     for(int i=0;i<4;i++){if(rks_run(s,&frame,&info))return fail("run");std::printf("run%d src_fd=%d bound_input_fd=%d stride=%u pre=%.3f npu=%.3f outputs=%.3f ms\n",i,frame.fd,info.input_dma_fd,info.input_stride_bytes,info.preprocess_ms,info.inference_ms,info.outputs_ms);}
     std::vector<std::vector<float>> constant_float(outputs);
     for(unsigned i=0;i<outputs;i++){
-        rks_tensor a{};rks_get_tensor(s,1,i,&a);std::vector<float> data(a.element_count);
+        rks_tensor a{};if(rks_get_tensor(s,1,i,&a))return fail("output tensor");std::vector<float> data(a.element_count);
         if(rks_copy_output(s,i,data.data(),data.size()))return fail("copy output");
         constant_float[i]=data;
-        unsigned negative=0,nonfinite=0;for(float f:data){negative+=f<0;nonfinite+=!std::isfinite(f);}
-        auto range=std::minmax_element(data.begin(),data.end());std::printf("output%u range=[%.7g,%.7g] negative=%u nonfinite=%u\n",i,*range.first,*range.second,negative,nonfinite);
-        unsigned spatial=a.dims[2]*a.dims[3];for(unsigned c=0;c<6;c++){auto first=data.begin()+c*spatial;auto range2=std::minmax_element(first,first+spatial);std::printf(" channel%u [%.7g,%.7g]\n",c,*range2.first,*range2.second);}
-        if(nonfinite)return 1;
+        if(!rks_test::print_float_output(stdout,i,a,data,RKNN_TENSOR_NCHW))return 1;
     }
     const int8_t* borrowed=nullptr;uint32_t borrowed_count=0;uint64_t generation=0,previous_generation=0;
     if(rks_borrow_output_int8(s,0,&borrowed,&borrowed_count,&generation)==0)return 1;
