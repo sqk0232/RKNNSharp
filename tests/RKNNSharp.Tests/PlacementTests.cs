@@ -1,4 +1,5 @@
 ﻿using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -79,9 +80,9 @@ public sealed unsafe class PlacementTests
         var state = calls.CreateState(new CallerThreadPlacement { CpuMask = 0xf0, UtilClampMin = 600 }, logger);
         using (var scope = PlacementScope.Enter(state)) { }
         int count = calls.TotalCalls;
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 100000; i++) { using var scope = PlacementScope.Enter(state); }
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        for (int i = 0; i < 1000; i++) { using var warmup = PlacementScope.Enter(state); }
+        _ = MeasureDisabledScopes(state);
+        long allocated = MeasureDisabledScopes(state);
         Assert.Equal(0, allocated);
         Assert.Equal(count, calls.TotalCalls);
         Assert.False(state.ShouldEnter);
@@ -93,6 +94,16 @@ public sealed unsafe class PlacementTests
         Assert.Equal(0xa5UL, calls.Scheduler.Current.Affinity.Words[10]);
         Assert.Equal(17u, calls.Scheduler.Current.Attributes.UtilMin);
         Assert.Equal(failure == "set-attr" ? 2 : failure == "set-affinity" ? 1 : 0, calls.SetAffinityCount);
+    }
+
+    // Compile the measured loop directly as optimized code. Tier promotion/OSR
+    // inside a test-runner method can add one-time allocations to its counter.
+    [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.AggressiveOptimization)]
+    private static long MeasureDisabledScopes(PlacementState state)
+    {
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 100000; i++) { using var scope = PlacementScope.Enter(state); }
+        return GC.GetAllocatedBytesForCurrentThread() - before;
     }
 
     [Theory]
