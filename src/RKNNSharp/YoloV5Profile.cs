@@ -92,7 +92,7 @@ public sealed class YoloV5Profile
         ArgumentNullException.ThrowIfNull(outputs);
         transform.Validate();
         ValidateOutputs(outputs.Select(output => output.Info).ToArray());
-        var candidates = new List<Detection>();
+        var candidates = new List<DetectionCandidate>();
         for (int head = 0; head < 3; head++)
         {
             var output = outputs[head];
@@ -130,7 +130,7 @@ public sealed class YoloV5Profile
                     float heightScale = 2 * Sigmoid(values[start + 3 * plane + cell]);
                     float width = widthScale * widthScale * anchor.Width, height = heightScale * heightScale * anchor.Height;
                     var box = new BoundingBox(centerX - width / 2, centerY - height / 2, centerX + width / 2, centerY + height / 2);
-                    if (box.IsValid) { candidates.Add(new Detection(classId, confidence, box)); }
+                    if (box.IsValid) { candidates.Add(new(new(classId, confidence, box), candidates.Count)); }
                 }
             }
         }
@@ -148,7 +148,7 @@ public sealed class YoloV5Profile
             lookups = new LookupSet(infos);
             Volatile.Write(ref _int8Lookups, lookups);
         }
-        var candidates = new List<Detection>();
+        var candidates = new List<DetectionCandidate>();
         for (int head = 0; head < 3; head++)
         {
             ReadOnlySpan<sbyte> values = head switch { 0 => head0, 1 => head1, _ => head2 };
@@ -180,7 +180,7 @@ public sealed class YoloV5Profile
                     float heightScale = 2 * lookup[values[start + 3 * plane + cell] + 128];
                     float width = widthScale * widthScale * anchor.Width, height = heightScale * heightScale * anchor.Height;
                     var box = new BoundingBox(centerX - width / 2, centerY - height / 2, centerX + width / 2, centerY + height / 2);
-                    if (box.IsValid) { candidates.Add(new Detection(classId, confidence, box)); }
+                    if (box.IsValid) { candidates.Add(new(new(classId, confidence, box), candidates.Count)); }
                 }
             }
         }
@@ -189,7 +189,7 @@ public sealed class YoloV5Profile
         return Finish(candidates, transform);
     }
 
-    private IReadOnlyList<Detection> Finish(IReadOnlyList<Detection> candidates, LetterboxTransform transform)
+    private IReadOnlyList<Detection> Finish(List<DetectionCandidate> candidates, LetterboxTransform transform)
     {
         // NMS is applied in model coordinates; restoration/clipping cannot change suppression at image edges.
         var selected = NonMaximumSuppression(candidates, NmsThreshold, MaxDetections);
@@ -252,16 +252,25 @@ public sealed class YoloV5Profile
 
     internal static IReadOnlyList<Detection> NonMaximumSuppression(IReadOnlyList<Detection> candidates, float threshold, int limit)
     {
-        var ordered = candidates.Select((value, index) => (value, index))
-            .Where(item => item.value.Box.IsValid && float.IsFinite(item.value.Confidence))
-            .OrderByDescending(item => item.value.Confidence).ThenBy(item => item.index);
-        var kept = new List<Detection>();
-        foreach (var item in ordered)
+        var ordered = new List<DetectionCandidate>(candidates.Count);
+        for (int index = 0; index < candidates.Count; index++)
         {
-            bool suppressed = kept.Any(previous => previous.ClassId == item.value.ClassId && IntersectionOverUnion(previous.Box, item.value.Box) > threshold);
+            Detection value = candidates[index];
+            if (value.Box.IsValid && float.IsFinite(value.Confidence)) { ordered.Add(new(value, index)); }
+        }
+        return NonMaximumSuppression(ordered, threshold, limit);
+    }
+
+    internal static IReadOnlyList<Detection> NonMaximumSuppression(List<DetectionCandidate> candidates, float threshold, int limit)
+    {
+        candidates.Sort();
+        var kept = new List<Detection>();
+        foreach (var item in candidates)
+        {
+            bool suppressed = kept.Any(previous => previous.ClassId == item.Value.ClassId && IntersectionOverUnion(previous.Box, item.Value.Box) > threshold);
             if (!suppressed)
             {
-                kept.Add(item.value);
+                kept.Add(item.Value);
                 if (kept.Count == limit) { break; }
             }
         }

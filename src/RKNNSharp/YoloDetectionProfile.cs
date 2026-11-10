@@ -107,7 +107,7 @@ public sealed class YoloDetectionProfile
                 }
             }
 
-            var candidates = new List<Detection>();
+            var candidates = new List<DetectionCandidate>();
             // Canonical branch order makes equal-score ties independent of the caller's mapping order.
             for (int slot = 0; slot < _headsByStride.Length; slot++)
             {
@@ -133,13 +133,13 @@ public sealed class YoloDetectionProfile
                     var box = new BoundingBox((centerX - left) * head.Stride, (centerY - top) * head.Stride,
                         (centerX + right) * head.Stride, (centerY + bottom) * head.Stride);
                     if (!box.IsValid) { continue; }
-                    if (!Config.MultiLabel) { candidates.Add(new(bestClass, bestScore, box)); }
+                    if (!Config.MultiLabel) { candidates.Add(new(new(bestClass, bestScore, box), candidates.Count)); }
                     else
                     {
                         for (int classId = 0; classId < Config.ClassCount; classId++)
                         {
                             float score = classes[classId * plane + cell];
-                            if (score >= Config.ConfidenceThreshold) { candidates.Add(new(classId, score, box)); }
+                            if (score >= Config.ConfidenceThreshold) { candidates.Add(new(new(classId, score, box), candidates.Count)); }
                         }
                     }
                 }
@@ -197,11 +197,13 @@ public sealed class YoloDetectionProfile
         return weighted / sum;
     }
 
-    private IReadOnlyList<Detection> Suppress(IReadOnlyList<Detection> candidates)
+    internal IReadOnlyList<Detection> Suppress(List<DetectionCandidate> candidates)
     {
+        candidates.Sort();
         var kept = new List<Detection>();
-        foreach (var candidate in candidates.OrderByDescending(candidate => candidate.Confidence))
+        foreach (var item in candidates)
         {
+            Detection candidate = item.Value;
             if (kept.Any(previous => previous.ClassId == candidate.ClassId &&
                 ReferenceIntersectionOverUnion(previous.Box, candidate.Box) > Config.NmsThreshold)) { continue; }
             kept.Add(candidate);
