@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text.Json;
 using RKNNSharp;
 
@@ -22,7 +21,7 @@ internal static class SingleFrameSample
           MODEL --contract-compare FIXTURE BASELINE_DLL [iterations=12] [EXPECTED_SHA256]
 
         codec: h264|h265; colorspace: auto|601limit|601full|709limit
-        decoder: v5 (default) uses YOLOv5 Detect; dfl uses the explicit 640/80 nine-output RunInto path.
+        decoder: v5 (default) selects YoloV5Detection; dfl selects explicit 640/80 nine-output YoloV8Detection.
         To select dfl, pass codec and colorspace before it. Neither decoder infers a model from its file name.
         mode: detect|run|compare|pipeline|replay; core: Auto|Core0|Core1|Core2|All
         See samples/RKNNSharp.Smoke/README.md for ranges, prerequisites and ownership.
@@ -42,57 +41,24 @@ internal static class SingleFrameSample
         string source = options.Rtsp ? File.ReadAllText(arguments[3]).Trim() : arguments[3];
         if (string.IsNullOrWhiteSpace(source)) { throw new ArgumentException("Source is empty."); }
 
-        using var model = new RknnModel(arguments[0]);
-        if (options.Decoder == SingleFrameDecoder.Dfl)
-        {
-            YoloDetectionProfile profile = CreateExplicitDfl640Example();
-            profile.ValidateModel(model.Inputs, model.Outputs);
-            return DetectDfl(model, profile, source, options);
-        }
-
-        var yolov5 = YoloV5Profile.CreateOfficial640Example();
-        yolov5.ValidateModel(model.Inputs, model.Outputs);
-        return DetectV5(model, yolov5, source, options);
+        bool dfl = options.Decoder == SingleFrameDecoder.Dfl;
+        using var pipeline = new RknnPipeline(dfl ? ModelType.YoloV8Detection : ModelType.YoloV5Detection,
+            arguments[0], dfl ? ExampleConfigurations.Dfl() : ExampleConfigurations.V5());
+        return Detect(pipeline, source, options);
     }
 
     /// <summary>文档中的 640×640、80 类、regMax 16、含 score-sum 的九输出示例. 不按文件名选择.</summary>
-    internal static YoloDetectionProfile CreateExplicitDfl640Example() => new(new YoloDetectionConfig(
-        640, 640, 80, YoloDetectionOutputFormat.RknnDfl,
-        [new(0, 1, 2, 8), new(3, 4, 5, 16), new(6, 7, 8, 32)]));
+    internal static RknnPipelineConfig CreateExplicitDfl640Example() => ExampleConfigurations.Dfl();
 
-    private static int DetectV5(RknnModel model, YoloV5Profile profile, string source, SingleFrameOptions options)
+    private static int Detect(RknnPipeline pipeline, string source, SingleFrameOptions options)
     {
         using var capture = new GStreamerCapture(source, options.Codec, options.Rtsp);
         GstFrame sample = capture.Pull();
         try
         {
             DmaFrame frame = GStreamerCapture.Borrow(in sample, options.ColorSpace);
-            DetectionResult result = model.Detect(frame, profile);
-            WriteResult(sample, frame, "v5", result.Detections, result.Timings, result.PostprocessMs);
-            return 0;
-        }
-        finally { GStreamerCapture.Release(ref sample); }
-    }
-
-    private static int DetectDfl(RknnModel model, YoloDetectionProfile profile, string source, SingleFrameOptions options)
-    {
-        using var capture = new GStreamerCapture(source, options.Codec, options.Rtsp);
-        GstFrame sample = capture.Pull();
-        try
-        {
-            DmaFrame frame = GStreamerCapture.Borrow(in sample, options.ColorSpace);
-            var buffers = new Memory<float>[model.Outputs.Count];
-            for (int i = 0; i < buffers.Length; i++)
-            {
-                uint elements = model.Outputs[i].ElementCount;
-                if (elements == 0 || elements > int.MaxValue) { throw new ArgumentException("Output tensor does not fit a managed float buffer."); }
-                buffers[i] = new float[(int)elements].AsMemory();
-            }
-            InferenceResult raw = model.RunInto(frame, buffers);
-            long postprocessStart = Stopwatch.GetTimestamp();
-            IReadOnlyList<Detection> detections = profile.Decode(raw.Outputs, raw.Transform);
-            double postprocessMs = Stopwatch.GetElapsedTime(postprocessStart).TotalMilliseconds;
-            WriteResult(sample, frame, "dfl", detections, raw.Timings, postprocessMs);
+            DetectionResult result = pipeline.Predict(frame);
+            WriteResult(sample, frame, options.Decoder == SingleFrameDecoder.Dfl ? "dfl" : "v5", result.Detections, result.Timings, result.PostprocessMs);
             return 0;
         }
         finally { GStreamerCapture.Release(ref sample); }

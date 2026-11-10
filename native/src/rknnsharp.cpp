@@ -2,6 +2,7 @@
 #include "rknn_float_output.h"
 #include "letterbox_fill.h"
 #include "draw_rects.h"
+#include "source_import_cache.h"
 #include <cstddef>
 #include <rknn_api.h>
 #include <im2d.h>
@@ -40,6 +41,10 @@ void check(int status,const char* operation){if(status<0)throw std::runtime_erro
 void rga(IM_STATUS s,const char* op){if(s!=IM_STATUS_SUCCESS&&s!=IM_STATUS_NOERROR)throw std::runtime_error(std::string(op)+": "+imStrError(s));}
 void require(bool v,const char* why){if(!v)throw std::runtime_error(why);}
 template<class F> int guard(F f){try{f();return 0;}catch(const std::exception& e){error=e.what();return -1;}catch(...){error="unknown native exception";return -1;}}
+}
+namespace rks_detail {
+// The externally linked opaque session owns this type. Give it matching
+// linkage even when this implementation is included by a regression test.
 struct Imported {
     rga_buffer_handle_t handle=0;
     rga_buffer_t image{};
@@ -53,6 +58,9 @@ struct Imported {
     ~Imported(){if(handle)releasebuffer_handle(handle);}
     Imported(const Imported&)=delete;
 };
+}
+using rks_detail::Imported;
+namespace {
 struct RgaJob {
     im_job_handle_t handle=imbeginJob();
     explicit RgaJob(bool required=true){if(required)require(handle!=0,"RGA imbeginJob failed");}
@@ -149,6 +157,7 @@ struct rks_session {
     rknn_tensor_mem *signed_input=nullptr;
     std::unique_ptr<rks_image> rgb_owner,signed_owner;
     std::unique_ptr<Imported> rgb_rga,signed_rga;
+    rks_detail::SourceImportCache<Imported> source_imports;
     uint32_t w=0,h=0,stride=0;
     std::vector<std::vector<float>> values;
     std::vector<std::vector<int8_t>> quantized_values;
@@ -161,7 +170,7 @@ struct rks_session {
     bool letterbox_fill_jobs=true;
     bool prefer_fast_float=false;
     dev_t input_device=0;ino_t input_inode=0;
-    ~rks_session(){rgb_rga.reset();signed_rga.reset();if(context){if(signed_input)rknn_destroy_mem(context,signed_input);rknn_destroy(context);}}
+    ~rks_session(){source_imports.clear();rgb_rga.reset();signed_rga.reset();if(context){if(signed_input)rknn_destroy_mem(context,signed_input);rknn_destroy(context);}}
 };
 struct FloatOutputs {float* const* values;const uint32_t* counts;uint32_t count;};
 extern "C" {
@@ -230,7 +239,9 @@ RKS_API int rks_set_float_output_mode(rks_session* s,uint32_t mode){return guard
     std::lock_guard<std::mutex> lock(s->gate);s->prefer_fast_float=mode==RKS_FLOAT_OUTPUT_PREFER_FAST_INT8;
 });}
 static int run_encoded(rks_session* s,const rks_frame* f,rks_run_info* info,bool quantized,const FloatOutputs* direct=nullptr){return guard([&]{
-    require(s,"null session");std::lock_guard<std::mutex> lock(s->gate);s->has_output=false;s->output_encoding=0;s->generation++;require(f&&info,"null run argument");*info={};
+    require(s,"null session");std::lock_guard<std::mutex> lock(s->gate);s->has_output=false;s->output_encoding=0;s->generation++;
+    try {
+    require(f&&info,"null run argument");*info={};
     require(!quantized||s->supports_int8,"raw path requires contiguous standard NCHW affine INT8 outputs");
     if(direct){
         require(!quantized&&direct->values&&direct->counts&&direct->count==s->attrs.size(),"float output buffer count mismatch");
@@ -246,7 +257,16 @@ static int run_encoded(rks_session* s,const rks_frame* f,rks_run_info* info,bool
             }
         }
     }
-    auto start=Clock::now();auto src=import(*f);auto rgb=s->rgb_rga->image;auto dst=s->signed_rga->image;
+    auto start=Clock::now();
+    int source_format=format(*f);
+    int source_bpp=f->format==RKS_RGB888?3:f->format==RKS_RGBA8888?4:1;
+    auto source=s->source_imports.acquire(*f,[&](int fd){
+        return std::make_unique<Imported>(fd,static_cast<uint32_t>(f->size_bytes),f->width,f->height,
+            f->row_stride_bytes/source_bpp,f->height_stride,source_format);
+    });
+    auto* src=source->imported.get();
+    src->device=source->allocation.st_dev;src->inode=source->allocation.st_ino;
+    auto rgb=s->rgb_rga->image;auto dst=s->signed_rga->image;
     if(f->format==RKS_NV12)src->image.color_space_mode=yuv_to_rgb(f->color_space);
     double scale=std::min(double(s->w)/f->width,double(s->h)/f->height);
     int rw=std::max(2,int(std::round(f->width*scale))),rh=std::max(2,int(std::round(f->height*scale)));
@@ -284,8 +304,7 @@ static int run_encoded(rks_session* s,const rks_frame* f,rks_run_info* info,bool
         // Optional batching of the same resize/CSC and INT8 fill. Any job
         // failure, including errors other than NOT_SUPPORTED, is cancelled by
         // the local guard and this frame uses the synchronous path below.
-        // Cache only this session capability decision, never an external fd
-        // or frame allocation.
+        // This capability decision is separate from the source import cache.
         if(!prepared)s->preprocessing_jobs=false;
     }
     if(!prepared){
@@ -329,6 +348,12 @@ static int run_encoded(rks_session* s,const rks_frame* f,rks_run_info* info,bool
     auto end=Clock::now();s->has_output=!direct;s->output_encoding=direct?0:quantized?2:1;
     info->scale_x=float(rw)/f->width;info->scale_y=float(rh)/f->height;info->pad_left=left;info->pad_top=top;info->resize_width=rw;info->resize_height=rh;
     info->preprocess_ms=ms(start,pre);info->inference_ms=ms(pre,run);info->outputs_ms=ms(run,end);info->input_dma_fd=s->signed_input->fd;info->input_stride_bytes=s->stride*3;
+    } catch (...) {
+        // Discard retained handles after any failed run. The next call imports
+        // afresh, without replaying partially completed hardware work.
+        s->source_imports.clear();
+        throw;
+    }
 });}
 int rks_run(rks_session* s,const rks_frame* f,rks_run_info* info){return run_encoded(s,f,info,false);}
 int rks_run_float_into(rks_session* s,const rks_frame* f,float* const* outputs,const uint32_t* counts,uint32_t count,rks_run_info* info){

@@ -234,6 +234,11 @@ public sealed class YoloDetectionProfileTests
         var profile = new YoloDetectionProfile(config);
         var infos = Outputs(config).Select(output => output.Info).ToArray();
         profile.ValidateModel([new(0, "input", [1, 32, 32, 3], 3072, 1, 2, 2, -128, 1f / 255)], infos);
+        TensorInfo saved = infos[0];
+        infos[0] = infos[1];
+        Assert.Throws<ArgumentException>(() => profile.ValidateModel([new(0, "input", [1, 32, 32, 3], 3072, 1, 2, 2, -128, 1f / 255)], infos));
+        infos[0] = saved;
+        profile.ValidateModel([new(0, "input", [1, 32, 32, 3], 3072, 1, 2, 2, -128, 1f / 255)], infos);
         Assert.Throws<ArgumentException>(() => profile.ValidateModel([new(0, "input", [1, 3, 32, 32], 3072, 0, 2, 2, -128, 1f / 255)], infos));
         Assert.Throws<ArgumentException>(() => profile.ValidateModel([new(0, "input", [1, 32, 32, 3], 3072, 1, 2, 2, -127, 1f / 255)], infos));
     }

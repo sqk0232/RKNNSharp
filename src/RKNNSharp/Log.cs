@@ -4,6 +4,9 @@ namespace RKNNSharp;
 
 internal static partial class Log
 {
+    [LoggerMessage(1002, LogLevel.Information, "RKNN pipeline created for {ModelType}.")]
+    internal static partial void PipelineCreated(ILogger logger, ModelType modelType);
+
     [LoggerMessage(1001, LogLevel.Information, "RKNN session created with core mask {CoreMask} and output mode {OutputMode}.")]
     internal static partial void SessionCreated(ILogger logger, NpuCoreMask coreMask, FloatOutputMode outputMode);
 

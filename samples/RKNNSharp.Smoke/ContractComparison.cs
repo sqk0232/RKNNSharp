@@ -26,12 +26,12 @@ internal static class ContractComparison
             }
             capture.Pause();
             using var baseline = new BaselineModel(baselineDll, modelPath);
-            using var candidate = new RknnModel(modelPath, NpuCoreMask.Core0, expectedHash);
+            using var candidate = new RknnPipeline(ModelType.YoloV5Detection, modelPath, ExampleConfigurations.V5(), new RknnModelOptions { CoreMask = NpuCoreMask.Core0, ExpectedModelSha256 = expectedHash });
             using var annotated = DmaImage.Allocate(2560, 1440);
-            var profile = YoloV5Profile.CreateOfficial640Example();
+
             for (int warmup = 0; warmup < 5; warmup++)
             {
-                sources[0].WithFrame(frame => { baseline.ReadRun(frame); candidate.Run(frame); baseline.Detect(frame); candidate.Detect(frame, profile); return 0; });
+                sources[0].WithFrame(frame => { baseline.ReadRun(frame); candidate.PredictRaw(frame); baseline.Detect(frame); candidate.Predict(frame); return 0; });
             }
             var baselineCopies = new List<double>();
             var candidateCopies = new List<double>();
@@ -60,7 +60,7 @@ internal static class ContractComparison
                         { throw new InvalidOperationException("Independent Run snapshots share an array."); }
                     }
                     var expected = baseline.Detect(frame);
-                    var actual = candidate.Detect(frame, profile);
+                    var actual = candidate.Predict(frame);
                     if (!expected.SequenceEqual(actual.Detections)) { throw new InvalidOperationException("Baseline/candidate Detection differs."); }
                     annotated.CopyFrom(frame); annotated.DrawRectangles(actual.Detections);
                     detections += actual.Detections.Count;
@@ -73,7 +73,7 @@ internal static class ContractComparison
                     InferenceResult ReadCandidate()
                     {
                         long allocated = GC.GetAllocatedBytesForCurrentThread();
-                        var result = candidate.Run(frame);
+                        var result = candidate.PredictRaw(frame);
                         candidateAllocations.Add(GC.GetAllocatedBytesForCurrentThread() - allocated);
                         return result;
                     }
@@ -109,6 +109,7 @@ internal static class ContractComparison
 
     private sealed record RawSnapshot(float[][] Values, LetterboxTransform Transform, double ManagedOutputsMs, long AllocatedBytes);
 
+    // 仅反射读取已验收的历史 DLL 作为回归基线; 当前库不导出这些旧 API, 也不提供兼容层.
     private sealed class BaselineModel : IDisposable
     {
         private readonly AssemblyLoadContext _context = new("accepted-rknn", isCollectible: true);

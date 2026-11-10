@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <PackageId>RKNNSharp</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <PackageReleaseNotes>https://github.com/sqk0232/RKNNSharp/blob/main/CHANGELOG.md</PackageReleaseNotes>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
@@ -11,11 +11,12 @@
     <RepositoryType>git</RepositoryType>
     <PackageProjectUrl>https://github.com/sqk0232/RKNNSharp</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReadmeFile>NUGET_README.md</PackageReadmeFile>
     <PackageTags>RKNN;RK3588;RGA;Linux;ARM64</PackageTags>
     <!-- 发布二进制中的调试路径使用固定虚拟根, 不暴露构建主机目录. -->
     <PathMap Condition="'$(Configuration)' == 'Release'">$(MSBuildProjectDirectory)=/_/src/RKNNSharp</PathMap>
-    <RKNNSharpNativeLibraryPath Condition="'$(RKNNSharpNativeLibraryPath)' == ''">$(MSBuildProjectDirectory)/../../publish/native/linux-arm64/librknnsharp_native.so</RKNNSharpNativeLibraryPath>
+    <_RKNNSharpUsingBundledNative Condition="'$(RKNNSharpNativeLibraryPath)' == ''">true</_RKNNSharpUsingBundledNative>
+    <RKNNSharpNativeLibraryPath Condition="'$(RKNNSharpNativeLibraryPath)' == ''">$(MSBuildProjectDirectory)/../../native/prebuilt/linux-arm64/librknnsharp_native.so</RKNNSharpNativeLibraryPath>
     <Description>RK3588 DMA-frame RKNN inference with RGA preprocessing.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <!-- Self-evident DTO members need no duplicated prose; retain all correctness warnings. -->
@@ -24,12 +25,19 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
     <InternalsVisibleTo Include="RKNNSharp.Tests" />
-    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../NUGET_README.md" Pack="true" PackagePath="/" />
     <None Include="../../LICENSE" Pack="true" PackagePath="/" />
     <None Include="$(RKNNSharpNativeLibraryPath)" Pack="true" PackagePath="runtimes/linux-arm64/native/librknnsharp_native.so" Visible="false" />
   </ItemGroup>
   <Target Name="ValidateRKNNSharpNativePackageAsset" BeforeTargets="GenerateNuspec">
     <Error Condition="!Exists('$(RKNNSharpNativeLibraryPath)')"
            Text="RKNNSharp requires a verified Linux ARM64 native bridge. Set RKNNSharpNativeLibraryPath to the matching librknnsharp_native.so before packing." />
+    <!-- 只固定随版本分发的桥接库; 自建 override 由使用者验证其来源及硬件兼容性. -->
+    <GetFileHash Files="$(RKNNSharpNativeLibraryPath)" Algorithm="SHA256"
+                 Condition="'$(_RKNNSharpUsingBundledNative)' == 'true'">
+      <Output TaskParameter="Hash" PropertyName="_RKNNSharpBundledNativeHash" />
+    </GetFileHash>
+    <Error Condition="'$(_RKNNSharpUsingBundledNative)' == 'true' And '$(_RKNNSharpBundledNativeHash)' != 'fc31bf63de75a64d40b5432448475bacf2e1512c84aa194ca66bbc66f56c3f6a'"
+           Text="Bundled RKNNSharp native SHA256 does not match the verified release asset. Rebuild and validate the bridge, then update its provenance and expected hash together." />
   </Target>
 </Project>

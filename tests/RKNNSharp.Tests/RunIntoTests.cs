@@ -15,7 +15,7 @@ public sealed unsafe class RunIntoTests
     {
         foreach (var inputType in new[] { typeof(DmaFrame), typeof(DmaImage) })
         {
-            var method = typeof(RknnModel).GetMethod("RunInto", [inputType, typeof(IReadOnlyList<Memory<float>>)]);
+            var method = typeof(RknnPipeline).GetMethod("PredictRawInto", [inputType, typeof(IReadOnlyList<Memory<float>>)]);
             Assert.NotNull(method);
             Assert.Equal(typeof(InferenceResult), method.ReturnType);
         }

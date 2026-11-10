@@ -7,9 +7,12 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace RKNNSharp;
 
 /// <summary>同步 RKNN 会话. 同一实例的 Run 和 Dispose 互斥; 不提供软件图像处理回退.</summary>
-public sealed class RknnModel : IDisposable
+internal sealed class RknnModel : IRknnSession
 {
     private readonly object _gate = new();
+    // Metadata and profile configuration are immutable. Bound retention to one success per type.
+    private YoloV5Profile? _validatedV5Profile;
+    private YoloDetectionProfile? _validatedDflProfile;
     private readonly SessionHandle _handle;
     private readonly bool _supportsDirectFloat;
     private readonly ILogger _logger;
@@ -21,23 +24,6 @@ public sealed class RknnModel : IDisposable
     public NpuCoreMask CoreMask { get; }
     /// <summary>请求的浮点输出模式. PreferFastInt8只对满足原生条件的head启用快速转换, 其他head仍由SDK转换.</summary>
     public FloatOutputMode OutputMode { get; }
-
-    /// <summary>从本地 RKNN 文件创建 Linux ARM64 会话, 验证原生 ABI/输入契约并显式配置 core policy.</summary>
-    /// <param name="modelPath">模型文件路径. 当前已验证模型见 docs/model-contract.md.</param>
-    /// <param name="coreMask">可选核心策略. Auto 为默认; 多核 mask 不保证缩短单次推理.</param>
-    public unsafe RknnModel(string modelPath, NpuCoreMask coreMask = NpuCoreMask.Auto)
-        : this(modelPath, coreMask, null, FloatOutputMode.SdkExact) { }
-
-    /// <summary>加载前可选校验模型主文件 SHA256. null 完全跳过hash读取; 校验仅发生在创建会话前.</summary>
-    /// <param name="modelPath">模型文件路径.</param>
-    /// <param name="coreMask">显式核心策略.</param>
-    /// <param name="expectedModelSha256">null 或64位十六进制摘要, 大小写均接受. 非签名或原子加载, 不证明anchors/精度.</param>
-    public unsafe RknnModel(string modelPath, NpuCoreMask coreMask, string? expectedModelSha256)
-        : this(modelPath, coreMask, expectedModelSha256, FloatOutputMode.SdkExact) { }
-
-    /// <summary>加载前可选校验模型SHA256, 并显式选择浮点输出模式. 显式快速模式需要支持配置导出的原生库.</summary>
-    public unsafe RknnModel(string modelPath, NpuCoreMask coreMask, string? expectedModelSha256, FloatOutputMode outputMode)
-        : this(modelPath, coreMask, expectedModelSha256, outputMode, null, null) { }
 
     /// <summary>使用可选调用线程调度与日志配置创建会话.</summary>
     public RknnModel(string modelPath, RknnModelOptions options)
@@ -115,6 +101,7 @@ public sealed class RknnModel : IDisposable
     private PlacementScope EnterPlacement() => PlacementScope.Enter(_placementState);
 
     /// <summary>借用输入直至方法返回. 调用方必须同步生产者, 并防止 FD/sample 关闭、复用或写入.</summary>
+    /// <remarks>非热路径便利 API. 每次分配并返回各输出的独立 float 快照. 高频调用使用 RunInto 复用缓冲区, 或使用 Detect 直接解码 INT8.</remarks>
     public unsafe InferenceResult Run(DmaFrame frame)
     {
         frame.Validate();
@@ -184,6 +171,7 @@ public sealed class RknnModel : IDisposable
     }
 
     /// <summary>运行期间持有 owned DMA 图像, Dispose 等待硬件访问结束.</summary>
+    /// <remarks>非热路径便利 API. 每次返回新分配的独立输出快照. 热路径使用 RunInto 或 Detect.</remarks>
     public InferenceResult Run(DmaImage image)
     {
         ArgumentNullException.ThrowIfNull(image);
@@ -261,10 +249,14 @@ public sealed class RknnModel : IDisposable
     public unsafe DetectionResult Detect(DmaFrame frame, YoloV5Profile profile)
     {
         ArgumentNullException.ThrowIfNull(profile);
-        profile.ValidateModel(Inputs, Outputs);
-        frame.Validate();
         lock (_gate)
         {
+            if (!ReferenceEquals(_validatedV5Profile, profile))
+            {
+                profile.ValidateModel(Inputs, Outputs);
+                _validatedV5Profile = profile;
+            }
+            frame.Validate();
             ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
             using var placement = EnterPlacement();
             bool added = false;
@@ -285,7 +277,7 @@ public sealed class RknnModel : IDisposable
                 }
                 double borrowMs = Stopwatch.GetElapsedTime(borrowStart).TotalMilliseconds;
                 long postprocessStart = Stopwatch.GetTimestamp();
-                var detections = profile.DecodeInt8(Outputs, head0, head1, head2, transform);
+                var detections = profile.DecodeInt8(Outputs, head0, head1, head2, transform, modelValidated: true);
                 return new DetectionResult(detections, transform,
                     new RunTimings(info.PreprocessMs, info.InferenceMs, info.OutputsMs, borrowMs),
                     Stopwatch.GetElapsedTime(postprocessStart).TotalMilliseconds);
@@ -306,6 +298,64 @@ public sealed class RknnModel : IDisposable
 
     /// <summary>运行期间持有 owned DMA 图像; Dispose 等待同步检测完成.</summary>
     public DetectionResult Detect(DmaImage image, YoloV5Profile profile)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        return image.WithFrame(frame => Detect(frame, profile));
+    }
+
+    /// <summary>同步运行标准 affine INT8 DFL 检测. 输出借用至解码结束, 返回独立检测结果.</summary>
+    /// <remarks>
+    /// 使用显式 (signedValue-zeroPoint)*scale 和稳定 DFL softmax, 不受 FloatOutputMode 影响.
+    /// 与 SDK want_float 的舍入可能不同, Run/RunInto 加 Decode 保留为 SDK 浮点参考路径.
+    /// </remarks>
+    public unsafe DetectionResult Detect(DmaFrame frame, YoloDetectionProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        lock (_gate)
+        {
+            if (!ReferenceEquals(_validatedDflProfile, profile))
+            {
+                profile.ValidateModel(Inputs, Outputs);
+                _validatedDflProfile = profile;
+            }
+            frame.Validate();
+            ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+            using var placement = EnterPlacement();
+            bool added = false;
+            try
+            {
+                _handle.DangerousAddRef(ref added);
+                NativeMethods.Check(NativeMethods.rks_run_int8(_handle, in frame, out var info));
+                var transform = NativeLetterboxGeometry.Create(frame, Inputs[0], in info);
+                long borrowStart = Stopwatch.GetTimestamp();
+                Span<nint> addresses = stackalloc nint[Outputs.Count];
+                Span<uint> counts = stackalloc uint[Outputs.Count];
+                ulong generation = 0;
+                for (int index = 0; index < Outputs.Count; index++)
+                {
+                    NativeMethods.Check(NativeMethods.rks_borrow_output_int8(_handle, (uint)index,
+                        out nint pointer, out uint count, out ulong currentGeneration));
+                    if (pointer == 0 || count != Outputs[index].ElementCount || count > int.MaxValue)
+                    { throw new RknnException("Native INT8 output pointer/element count mismatch."); }
+                    if (index > 0 && currentGeneration != generation)
+                    { throw new RknnException("Native output generation mismatch."); }
+                    generation = currentGeneration;
+                    addresses[index] = pointer;
+                    counts[index] = count;
+                }
+                double borrowMs = Stopwatch.GetElapsedTime(borrowStart).TotalMilliseconds;
+                long postprocessStart = Stopwatch.GetTimestamp();
+                var detections = profile.DecodeInt8(Outputs, addresses, counts, transform, modelValidated: true);
+                return new DetectionResult(detections, transform,
+                    new RunTimings(info.PreprocessMs, info.InferenceMs, info.OutputsMs, borrowMs),
+                    Stopwatch.GetElapsedTime(postprocessStart).TotalMilliseconds);
+            }
+            finally { if (added) { _handle.DangerousRelease(); } }
+        }
+    }
+
+    /// <summary>运行期间持有 owned DMA 图像; Dispose 等待同步 DFL 检测完成.</summary>
+    public DetectionResult Detect(DmaImage image, YoloDetectionProfile profile)
     {
         ArgumentNullException.ThrowIfNull(image);
         return image.WithFrame(frame => Detect(frame, profile));

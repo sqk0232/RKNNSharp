@@ -5,19 +5,12 @@ namespace RKNNSharp.Tests;
 public sealed class FloatOutputModeTests
 {
     [Fact]
-    public void ExplicitModesPreserveExistingConstructorSignatures()
+    public void UnifiedPipelineKeepsFloatModeContract()
     {
         Assert.Equal(0u, (uint)FloatOutputMode.SdkExact);
         Assert.Equal(1u, (uint)FloatOutputMode.PreferFastInt8);
-        var original = typeof(RknnModel).GetConstructor([typeof(string), typeof(NpuCoreMask)]);
-        Assert.NotNull(original);
-        Assert.True(original.GetParameters()[1].IsOptional);
-        Assert.Equal(NpuCoreMask.Auto, original.GetParameters()[1].DefaultValue);
-        Assert.NotNull(typeof(RknnModel).GetConstructor([typeof(string), typeof(NpuCoreMask), typeof(string)]));
-        var explicitMode = typeof(RknnModel).GetConstructor([typeof(string), typeof(NpuCoreMask), typeof(string), typeof(FloatOutputMode)]);
-        Assert.NotNull(explicitMode);
-        Assert.False(explicitMode.GetParameters()[3].IsOptional);
-        Assert.Equal(typeof(FloatOutputMode), typeof(RknnModel).GetProperty(nameof(RknnModel.OutputMode))!.PropertyType);
+        Assert.Equal(FloatOutputMode.SdkExact, new RknnModelOptions().OutputMode);
+        Assert.Equal(typeof(FloatOutputMode), typeof(RknnPipeline).GetProperty(nameof(RknnPipeline.OutputMode))!.PropertyType);
     }
 
     [Theory]
@@ -26,7 +19,7 @@ public sealed class FloatOutputModeTests
     public void UnknownModeIsRejectedBeforeFileOrNativeAccess(uint mode)
     {
         var error = Assert.Throws<ArgumentOutOfRangeException>(() =>
-            new RknnModel("absent-model.rknn", NpuCoreMask.Auto, null, (FloatOutputMode)mode));
+            new RknnPipeline(ModelType.RawTensor, "absent-model.rknn", options: new RknnModelOptions { OutputMode = (FloatOutputMode)mode }));
         Assert.Equal("outputMode", error.ParamName);
     }
 
@@ -36,13 +29,13 @@ public sealed class FloatOutputModeTests
     public void ModeDoesNotBypassModelHashValidation(FloatOutputMode mode)
     {
         var malformed = Assert.Throws<ArgumentException>(() =>
-            new RknnModel("absent-model.rknn", NpuCoreMask.Auto, "not-a-sha256", mode));
+            new RknnPipeline(ModelType.RawTensor, "absent-model.rknn", options: new RknnModelOptions { ExpectedModelSha256 = "not-a-sha256", OutputMode = mode }));
         Assert.Equal("expectedModelSha256", malformed.ParamName);
         string path = Path.GetTempFileName();
         try
         {
             File.WriteAllBytes(path, [1, 2, 3, 4]);
-            Assert.Throws<InvalidDataException>(() => new RknnModel(path, NpuCoreMask.Auto, new string('0', 64), mode));
+            Assert.Throws<InvalidDataException>(() => new RknnPipeline(ModelType.RawTensor, path, options: new RknnModelOptions { ExpectedModelSha256 = new string('0', 64), OutputMode = mode }));
             using var exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
         }
         finally { File.Delete(path); }
@@ -54,15 +47,15 @@ public sealed class FloatOutputModeTests
     public void ModeDoesNotBypassMissingModelValidation(FloatOutputMode mode)
     {
         string missing = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "absent-model.rknn");
-        var error = Assert.Throws<FileNotFoundException>(() => new RknnModel(missing, NpuCoreMask.Auto, null, mode));
+        var error = Assert.Throws<FileNotFoundException>(() => new RknnPipeline(ModelType.RawTensor, missing, options: new RknnModelOptions { OutputMode = mode }));
         Assert.Equal(missing, error.FileName);
     }
 
     [Fact]
-    public void ExistingDefaultLiteralHashCallRemainsUnambiguous()
+    public void DefaultOptionsStillRejectMissingModel()
     {
         string missing = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "absent-model.rknn");
-        var error = Assert.Throws<FileNotFoundException>(() => new RknnModel(missing, NpuCoreMask.Auto, default));
+        var error = Assert.Throws<FileNotFoundException>(() => new RknnPipeline(ModelType.RawTensor, missing));
         Assert.Equal(missing, error.FileName);
     }
 }

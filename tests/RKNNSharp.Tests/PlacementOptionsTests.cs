@@ -16,8 +16,8 @@ public sealed class PlacementOptionsTests
         Assert.Null(options.LoggerFactory);
         Assert.Null(options.ExpectedModelSha256);
         Assert.Equal(PlacementFailureMode.WarnOnceAndContinue, new CallerThreadPlacement().OnFailure);
-        Assert.NotNull(typeof(RknnModel).GetConstructor([typeof(string), typeof(RknnModelOptions)]));
-        Assert.Throws<ArgumentNullException>(() => new RknnModel("missing", (RknnModelOptions)null!));
+        Assert.Single(typeof(RknnPipeline).GetConstructors());
+        Assert.Throws<FileNotFoundException>(() => new RknnPipeline(ModelType.RawTensor, "missing", options: null));
     }
 
     [Fact]
@@ -44,7 +44,7 @@ public sealed class PlacementOptionsTests
         Assert.Throws<PlatformNotSupportedException>(() => new CallerThreadPlacement { CpuMask = 1 }.Validate(false, null));
         if (!OperatingSystem.IsLinux())
         {
-            Assert.Throws<PlatformNotSupportedException>(() => new RknnModel("missing", new RknnModelOptions { CallerThreadPlacement = new CallerThreadPlacement { CpuMask = 1 } }));
+            Assert.Throws<PlatformNotSupportedException>(() => new RknnPipeline(ModelType.RawTensor, "missing", options: new RknnModelOptions { CallerThreadPlacement = new CallerThreadPlacement { CpuMask = 1 } }));
             Assert.Throws<PlatformNotSupportedException>(CallerThreadPlacement.HighestCapacityCores);
         }
     }
@@ -101,6 +101,7 @@ public sealed class PlacementOptionsTests
     private static void WriteAllLogs(ILogger logger)
     {
         Log.SessionCreated(logger, NpuCoreMask.Auto, FloatOutputMode.SdkExact);
+        Log.PipelineCreated(logger, ModelType.YoloV5Detection);
         Log.PlacementEnabled(logger, 0xf0, 600);
         Log.PlacementFailed(logger, "sched_setattr", 1);
         Log.PlacementRestoreFailed(logger, "sched_setaffinity", 22);

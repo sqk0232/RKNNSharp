@@ -49,6 +49,8 @@ public sealed class Int8DecodeTests
             var expected = FloatReference(profile, infos, buffers, transform);
             var actual = profile.DecodeInt8(infos, buffers[0], buffers[1], buffers[2], transform);
             Assert.Equal(expected, actual);
+            profile.ValidateModel([new(0, "input", [1, 32, 32, 3], 3072, 1, 2, 2, -128, 1f / 255)], infos);
+            Assert.Equal(actual, profile.DecodeInt8(infos, buffers[0], buffers[1], buffers[2], transform, modelValidated: true));
         }
     }
 
@@ -131,6 +133,6 @@ public sealed class Int8DecodeTests
         Assert.Throws<ArgumentException>(() => profile.DecodeInt8(infos, new sbyte[1], buffers[1], buffers[2], transform));
         infos[0] = new(0, "head", [1, 24, 4, 4], 384, 0, 2, 2, 0, float.MaxValue);
         Assert.Throws<ArgumentException>(() => profile.DecodeInt8(infos, buffers[0], buffers[1], buffers[2], transform));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new RknnModel("unused", (NpuCoreMask)5));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new RknnPipeline(ModelType.RawTensor, "unused", options: new RknnModelOptions { CoreMask = (NpuCoreMask)5 }));
     }
 }

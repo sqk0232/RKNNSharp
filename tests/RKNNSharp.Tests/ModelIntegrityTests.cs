@@ -6,16 +6,10 @@ namespace RKNNSharp.Tests;
 public sealed class ModelIntegrityTests
 {
     [Fact]
-    public void NullHashDoesNotInspectTheFileAndOldConstructorSignatureIsPreserved()
+    public void NullHashDoesNotInspectTheFileAndRemainsTheDefault()
     {
         ModelFileIntegrity.Verify(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString(), "absent.rknn"), null);
-        var old = typeof(RknnModel).GetConstructor([typeof(string), typeof(NpuCoreMask)]);
-        Assert.NotNull(old);
-        Assert.True(old.GetParameters()[1].IsOptional);
-        Assert.Equal(NpuCoreMask.Auto, old.GetParameters()[1].DefaultValue);
-        var added = typeof(RknnModel).GetConstructor([typeof(string), typeof(NpuCoreMask), typeof(string)]);
-        Assert.NotNull(added);
-        Assert.False(added.GetParameters()[2].IsOptional);
+        Assert.Null(new RknnModelOptions().ExpectedModelSha256);
     }
 
     [Theory]
@@ -25,7 +19,7 @@ public sealed class ModelIntegrityTests
     [InlineData("GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG")]
     public void InvalidDigestFailsBeforeFileOrNativeAccess(string expected)
     {
-        var error = Assert.Throws<ArgumentException>(() => new RknnModel("missing.rknn", NpuCoreMask.Auto, expected));
+        var error = Assert.Throws<ArgumentException>(() => new RknnPipeline(ModelType.RawTensor, "missing.rknn", options: new RknnModelOptions { ExpectedModelSha256 = expected }));
         Assert.Equal("expectedModelSha256", error.ParamName);
     }
 
@@ -39,7 +33,7 @@ public sealed class ModelIntegrityTests
             string expected = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
             ModelFileIntegrity.Verify(path, expected.ToLowerInvariant());
             ModelFileIntegrity.Verify(path, expected.ToUpperInvariant());
-            Assert.Throws<InvalidDataException>(() => new RknnModel(path, NpuCoreMask.Auto, new string('0', 64)));
+            Assert.Throws<InvalidDataException>(() => new RknnPipeline(ModelType.RawTensor, path, options: new RknnModelOptions { ExpectedModelSha256 = new string('0', 64) }));
             ModelFileIntegrity.Verify(path, expected);
             File.WriteAllBytes(path, [5, 6, 7, 8]);
             Assert.Throws<InvalidDataException>(() => ModelFileIntegrity.Verify(path, expected));
