@@ -1,4 +1,6 @@
-# RKNNSharp 0.3.0
+# RKNNSharp 0.4.0
+
+本文描述0.4.0功能及有限验证范围, 发布可用性以NuGet页面为准. 同 Runtime 的真实0.3.0/候选包有限对照未发现新增输出或几何回归; 精确vendor插值合同、mAP及长期稳定性仍未验证. 本文示例按0.4.0 API编写; 已发布 0.3.0 的迁移历史保留, 新 API 见 [0.4 迁移说明](https://github.com/sqk0232/RKNNSharp/blob/main/docs/migration-0.4.md).
 
 面向 **.NET 10 / Linux ARM64 / RK3588** 的 C# 推理库。应用提供已就绪的 DMA 图像，库通过 RGA 预处理和 RKNN NPU 推理，返回检测结果或浮点张量。适合已有硬件采集链路的工业视觉应用。
 
@@ -9,11 +11,11 @@
 在自己的 `net10.0` 应用目录执行：
 
 ```sh
-dotnet add package RKNNSharp --version 0.3.0
+dotnet add package RKNNSharp --version 0.4.0
 dotnet publish -c Release -r linux-arm64 --self-contained false
 ```
 
-将整个发布目录部署到板端，安装 .NET 10 运行时，确保外置 `librknnrt.so`、`librga.so` 及其依赖能被动态加载器找到。SDK 会选择包内 `runtimes/linux-arm64/native/librknnsharp_native.so`，无需另行编译桥接库。
+若消费本地pack结果, 在安装命令末尾添加`--source publish/nuget`, 并替换为实际本地包源路径. 将整个应用发布目录部署到板端，安装 .NET 10 运行时，确保外置 `librknnrt.so`、`librga.so` 及其依赖能被动态加载器找到。SDK 会选择包内 `runtimes/linux-arm64/native/librknnsharp_native.so`，无需另行编译桥接库。
 
 已测环境为 RK3588 LubanCat-5 V2、Linux AArch64/kernel 6.1.84、Ubuntu 22.04.5/glibc 2.35、RKNN Runtime 2.3.2 / RKNPU driver 0.9.8、RGA 1.10.1_[3] / driver 1.3.7。桥接库使用 ABI **2**。运行用户需要访问 `/dev/rga`、NPU 节点及 `/dev/dma_heap/system-uncached-dma32`；设备权限按 BSP 配置，不要求以 root 运行。其他 BSP、RK3588S、运行库及模型组合需自行验证，Windows/x64 不能运行硬件推理。
 
@@ -78,6 +80,14 @@ using var pipeline = new RknnPipeline(
 
 并行吞吐提高不等于单请求延迟降低，不能取总 FPS 的倒数作为延迟；轮间有波动，其他模型/设备需重测。同一设备、Runtime、驱动及静态模型的另组验证中，池 3 共享权重相比逐会话独立创建，按 dma-buf 统计节省 DMA 内存约 16.2 MiB（YOLOv5s）/ 6.5 MiB（YOLOv8n）；池 1/3、单线程/多线程的 1210 次结果比较全部一致；150 次创建/推理/释放循环后上下文与 DMA 内存不累积。有限验证不代表动态维或长期运行均通过。
 
+## 有限验证范围
+
+2026-11-11 在上述同一RK3588/Runtime2.3.2/RGA1.10.1_[3]环境, 官方0.3.0与候选真实包对固定512×384 RGB bus帧及指定静态V5/V8n分别运行. 各自Raw/Into全头逐字节一致, 旧新3/9头hash与Transform一致, 检测均4 person/1 bus. 每模型每版本3轮、每轮100预热+300正式样本, 共3600正式样本未观察到一致性能回退; 计时只含同步Predict, 不含采集解码、日志与断言.
+
+候选动态概率模型640/480/320、池1/3的Raw/Into、180次全头并发对照、512拒绝后640恢复及5次池3建销均通过有限实机验证. 该模型使用RawTensor和应用显式概率解码, 不改变V5默认logits合同. 候选V8n真实包同一进程590.001秒内34598次Predict满足4 person/1 bus、有限分数及有效框门槛, 正常exit0. pipeline/fixture释放后DMA分别为1/0; 两个DRM/RGA设备句柄保留至进程退出, 与0.3.0同阶段一致且有限建销未新增累积, 不称全部原生资源归零或已证明无泄漏. 本任务进程退出后占用已核查释放, 不代表长期稳定性.
+
+RGA三路自然/合成夹具的内容像素零差, 同Runtime旧新包输出和几何零差, 未发现新增包装/版本回归. 精确vendor像素数学仍未匹配, 相对理想half-pixel的差异不能单独证明本次新增产品缺陷, 也不构成任意像素精度已通过的结论. 缺少独立标注集, 不宣称mAP、任意模型/BSP或长期稳定性. 条件与数值见[候选验收记录](https://github.com/sqk0232/RKNNSharp/blob/main/README.md#040-有限验证).
+
 ## 模型与输出选择
 
 | `ModelType` | 配置与调用 | 支持边界 |
@@ -100,7 +110,7 @@ using var pipeline = new RknnPipeline(
 | `Run` / `RunInto` | `PredictRaw` / `PredictRawInto`；普通张量模型选择 `RawTensor` |
 | DMA、结果、选项契约；原生 ABI 2 | 保留；Logging.Abstractions 依赖继续存在 |
 
-上述表格保留0.3.0迁移历史；新增公开RknnModel(modelPath)及options重载用于原始张量，检测profile保持内部实现，历史映射见[0.3迁移指南](https://github.com/sqk0232/RKNNSharp/blob/main/docs/migration-0.3.md)。
+上述表格保留 0.3.0 已发布历史. 0.4.0新增公开 `RknnModel(modelPath)` 和 `RknnModel(modelPath, options)` 的原始张量入口, 检测 profile 保持内部实现. 新调用见[0.4 迁移说明](https://github.com/sqk0232/RKNNSharp/blob/main/docs/migration-0.4.md), 历史映射见[0.3 迁移指南](https://github.com/sqk0232/RKNNSharp/blob/main/docs/migration-0.3.md).
 
 本轮包含 DFL INT8 路径、profile 缓存、NMS 原地排序及源 DMA 导入缓存；[优化前后测量](https://github.com/sqk0232/RKNNSharp/blob/main/README.md#本轮优化前后)只代表所列模型和设备，包含前后处理、不含采集解码，不是官方 0.2.0 对 0.3.0 的版本跑分。不承诺任意模型加速、mAP 或长期稳定性。
 

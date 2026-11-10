@@ -2,6 +2,8 @@
 
 [![NuGet](https://img.shields.io/nuget/v/RKNNSharp.svg)](https://www.nuget.org/packages/RKNNSharp/)
 
+当前源码版本为 **0.4.0**. 新 API 见 [0.3 → 0.4 迁移](docs/migration-0.4.md). 同 Runtime 的实际旧新包有限对照未发现新增输出或几何回归, 验证范围见[有限验证](#040-有限验证). vendor 精确插值合同、mAP 和长期稳定性仍未验证; 已完成上述指定环境的有限技术验收, 不扩大支持承诺. 已发布版本以 NuGet 页面为准.
+
 面向 **Linux ARM64 / RK3588** 的 C# RKNN 推理库。接收采集层已就绪的 DMA 帧，通过 RGA 预处理、NPU 推理，返回 tensor 或检测结果。核心托管库不依赖 GStreamer、OpenCV、Python 或 PyTorch；仓库提供独立的 GStreamer/MPP 采集样例。
 
 硬件路径为 `VPU/MPP → NV12 DMA → RGA resize/CSC/INT8 → NPU → CPU tensor 后处理`。RGA 存在必要的硬件拷贝，不宣称全链路无拷贝。绘框在独占 DMA 图像上进行，不修改解码器参考帧；不提供 CPU 图像处理或软件解码回退。
@@ -41,7 +43,7 @@ dotnet run --project samples/RKNNSharp.Smoke -c Release --no-build -- --help
 dotnet add path/to/YourApp.csproj reference src/RKNNSharp/RKNNSharp.csproj
 ```
 
-`path/to/YourApp.csproj` 替换为自己的 `net10.0` 应用项目。下面使用模型尺寸推断与统一检测入口：
+`path/to/YourApp.csproj` 替换为自己的 `net10.0` 应用项目。下列示例使用 0.4.0的模型尺寸推断; 0.3.0 引入的统一检测入口继续保留：
 
 ```csharp
 using RKNNSharp;
@@ -105,12 +107,12 @@ using var pipeline = new RknnPipeline(
 
 ## NuGet 安装与本地打包
 
-0.3.0 包仅面向 **.NET 10** 应用；没有提供 .NET 6/8 资产。核心包包含 `RKNNSharp.dll`、XML 文档、MIT 许可证、消费者专用 `NUGET_README.md`，以及 `runtimes/linux-arm64/native/librknnsharp_native.so`，依赖 Logging.Abstractions 10.0.0。包本身不包含 .NET 运行时、模型、厂商 RKNN/RGA 库、驱动或 GStreamer 采集 adapter。
+0.4.0包仅面向 **.NET 10** 应用；没有提供 .NET 6/8 资产。核心包包含 `RKNNSharp.dll`、XML 文档、MIT 许可证、消费者专用 `NUGET_README.md`，以及 `runtimes/linux-arm64/native/librknnsharp_native.so`，依赖 Logging.Abstractions 10.0.0。包本身不包含 .NET 运行时、模型、厂商 RKNN/RGA 库、驱动或 GStreamer 采集 adapter。
 
 从 nuget.org 安装到自己的应用，再发布 Linux ARM64 输出：
 
 ```sh
-dotnet add path/to/YourApp.csproj package RKNNSharp --version 0.3.0
+dotnet add path/to/YourApp.csproj package RKNNSharp --version 0.4.0
 dotnet publish path/to/YourApp.csproj -c Release -r linux-arm64 --self-contained false
 ```
 
@@ -137,7 +139,7 @@ dotnet pack src/RKNNSharp/RKNNSharp.csproj -c Release -o publish/nuget
 | 平台/原生契约 | net10.0、Linux ARM64/RK3588、ABI 2 | 保留；分发匹配的已验桥接库 |
 | 托管依赖 | Logging.Abstractions 10.0.0 | 保留，默认空日志 |
 
-上述表格保留0.3.0迁移历史；新增公开的RknnModel原始张量入口、会话池与输入推断见上文，检测profile仍为内部实现。
+上述表格保留 0.3.0 已发布历史, 具体调用映射见[0.3 迁移指南](https://github.com/sqk0232/RKNNSharp/blob/main/docs/migration-0.3.md)。0.4.0新增的公开 `RknnModel`、会话池与输入推断见[0.4 迁移说明](docs/migration-0.4.md)。
 
 ## 在目标板运行样例
 
@@ -169,6 +171,25 @@ read -r -p '来源色域 auto/601limit/601full/709limit: ' COLOR_SPACE
 H.265 输入将 `h264` 改成 `h265`。`auto` 要求 caps 明确声明支持的色域；否则由调用方确认矩阵和范围。RTSP 使用 `--rtsp-file` 替换 `--file`，文件内容为完整私有 URL；不要把 URL 或凭据写进命令行、日志或仓库。
 
 样例输出单帧 PTS、检测结果和阶段耗时，不保存或显示图像。完整参数、退出码、有限帧诊断及流水线入口见[样例说明](https://github.com/sqk0232/RKNNSharp/blob/main/samples/RKNNSharp.Smoke/README.md)；完整部署步骤见[整合说明](https://github.com/sqk0232/RKNNSharp/blob/main/docs/integration.md#从源码使用)。
+
+## 0.4.0 有限验证
+
+2026-11-11 在上述 RK3588 LubanCat-5 V2、RKNN Runtime 2.3.2 / RKNPU 0.9.8、RGA 1.10.1_[3] / driver 1.3.7、.NET 10.0.13 上, 分别消费官方 0.3.0 和本地 0.4.0 的真实 nupkg. 两侧各自加载包内 DLL/ABI2 桥接, 运行时记录实际路径及 SHA256, 共用同一厂商运行库. 输入是固定的 512×384 RGB888 bus 帧, 模型为下文列出的静态 V5 与 V8n/DFL; 这组比较与下节历史优化比较分开记录.
+
+四次包功能运行全部成功. 每代包的 Raw/Into 全头逐字节一致; 旧新包的 V5 三头、V8n 九头全部字节 hash 一致, Transform 均为源512×384、scaleX/scaleY=1.25、padLeft=0、padTop=80, 检测均为4 person/1 bus. 这些证据未发现本次包装或版本变化引入的静态输出/几何回归.
+
+性能使用 CPU4–7、默认 Auto 核心和 SdkExact, 旧新交替执行, 每模型每版本3个独立进程, 每进程100次预热+300次正式样本, 总计3600样本. 计时只包围同步 `Predict(image)`, 含预处理、NPU与后处理, 不含采集解码、加载、日志与结果断言. 下表均值合并每模型每版本的900个正式样本, P95按第1/2/3轮分别列出, 未将各轮P95冒充合并样本P95. 均值变化为V5 -0.21%、V8n +0.12%, 各轮P95范围重叠, 未观察到一致性能回退, 不将小幅差异宣传为加速承诺.
+
+| 模型 | 0.3.0 合并均值 ms | 候选合并均值 ms | 0.3.0 各轮 P95 ms | 候选各轮 P95 ms |
+| --- | ---: | ---: | ---: | ---: |
+| 指定静态 V5 | 19.236465 | 19.195750 | 19.4667 / 19.4705 / 19.4986 | 19.4766 / 19.4405 / 19.4989 |
+| 指定静态 V8n/DFL | 16.999237 | 17.019117 | 17.5324 / 17.6497 / 17.2408 | 17.3335 / 17.6433 / 17.5281 |
+
+候选真实包还完成动态概率模型640/480/320与池1/3: Raw/Into逐字节一致, 180次并发调用与各形状独立快照的全部head/metadata/Transform一致, 不支持的512形状拒绝后640恢复, 以及5次池3创建/释放. 该模型通过 RawTensor 加应用显式概率后处理使用, 不改变内置V5的raw-logits合同. 另对候选V8n真实包以同一进程连续调用590.001秒, 34598次Predict均满足4 person/1 bus、有限分数及有效框门槛, 正常exit0.
+
+该有界运行的外部稳态RSS为80004–88040KiB, 60–120秒/528–588秒平均80422.3/80152.5KiB; 未强制GC, 释放后RSS亦不要求归零. pipeline.Dispose后DMA仅剩fixture的1个, fixture.Dispose后DMA为0. 两个设备句柄`/dev/dri/card0`与`/dev/rga`保留至进程退出, 与官方0.3.0相同阶段一致, 动态5次建销后数量仍为2; 有限循环未见新增累积, 具体持有层未唯一确认, 不称全部原生资源归零或已证明无泄漏. 进程退出后本任务占用已独立核查释放, 本次590秒窗口不代表长期稳定性.
+
+RGA 自然/合成夹具的居中 improcess、内容区 improcess 与纯 imresize 三路, 每对921600内容字节均零差, 与既有同步路径全帧亦零差. 相对理想 half-pixel 参考的差异仍存在, 精确 vendor 1.10.1_[3] 数学合同尚未匹配; 三路一致及旧新包输出/几何一致不足以证明任意插值正确性, 也不支持仅据理想参考差异判定本次新增产品缺陷. 不宣称 mAP、任意模型/BSP、实时重连或长期稳定性已验, 不据这些有限结果自动放行发布.
 
 ## 本轮优化前/后
 

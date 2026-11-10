@@ -2,7 +2,7 @@
 
 ## 统一构造与预测
 
-检测构造入口为 `RknnPipeline(ModelType, modelPath, config?, options?, logger?)`；另公开 `RknnModel(modelPath)` / `(modelPath, options)` 的原始张量入口及Run/RunInto重载。检测profile保持内部实现，native ABI继续为2。
+检测构造入口为 `RknnPipeline(ModelType, modelPath, config?, options?, logger?)`. 0.4.0同时公开 `RknnModel(modelPath)` / `RknnModel(modelPath, options)` 的原始张量入口, 支持 `Run` / `RunInto` 及 DMA 图像重载. 检测 profile 保持内部实现, native ABI 继续为 2. 版本映射与验证边界见[0.4 迁移说明](migration-0.4.md); [0.3 历史](migration-0.3.md)保留.
 
 `ModelType.YoloV5Detection` 要求显式 anchors; `YoloV8Detection` 目前仅支持指定 RKNN 三尺度 DFL 导出契约, 要求显式 heads/RegMax. 不保证任意 YOLOv8 导出兼容, 也不表示已支持 YOLO11. 检测 config 必须提供且匹配枚举; 普通原始张量模型使用 `RawTensor`, 不传检测 config.
 
@@ -82,7 +82,7 @@ using var pipeline = new RknnPipeline(
 
 `Inputs`、`Outputs`、尺寸属性保留构造时快照. 动态模型的检测配置在执行时按本次具体形状绑定, `pipeline.Config` 保留原配置. `InferenceResult.Inputs` 和每个输出的 `Info` 携带本次实际属性, 可供并发结果解码使用. 动态 `PredictRawInto` 的缓冲区须按请求形状的实际输出预先准备, 可先用独立快照查询该形状输出. 每个并发调用独占自己的输出缓冲区. 显式配置宽高仍须匹配实际执行形状.
 
-V5内置检测要求raw logits。动态model-zoo yolov5s_relu概率头使用RawTensor和应用显式概率解码，不改变产品默认语义；有限验证不代表mAP、任意模型或长期稳定性。
+V5 内置检测仍要求 raw logits. 已有动态 model-zoo yolov5s_relu 的概率头应使用 RawTensor 和应用显式概率解码; 应用验收 harness 的合同修正不改变产品默认语义. 候选真实包三形状/池1/3的Raw/Into、180次并发全头/metadata/Transform对照和失败恢复有限板验通过; 不代表mAP、任意模型或长期稳定性. 同Runtime旧新真实包的指定静态V5/V8n全头及几何一致, RGA三路夹具像素一致, 未发现新增包装/版本回归. 精确vendor插值数学仍未匹配, 不仅据理想half-pixel差异判定新增产品缺陷, 也不宣称完整像素精度通过; 已完成上述指定环境的有限技术验收, 不扩大支持承诺.
 
 ## 原始张量与浮点参考
 
@@ -128,7 +128,7 @@ using var pipeline = new RknnPipeline(ModelType.YoloV5Detection, modelPath, conf
 
 快速模式可能因舍入与 SDK 输出不同, 包括 zero point 附近的非零残留, 不保证任意置信度、排序或 NMS IoU 边界处所有检测决策相同. 固定模型误差不是通用上界; 使用前需验证自己的模型和阈值. 旧 native 支持默认模式; 显式快速请求缺少可选配置导出时构造抛 NotSupportedException 并释放会话, 不会静默改回默认.
 
-SDK浮点参考使用默认SdkExact的 `pipeline.Decode(pipeline.PredictRaw(frame))`。INT8与SDK浮点舍入不保证bit exact。DFL同分NMS保留稳定插入顺序，调用方须验证阈值附近及同分选择。
+SDK 浮点参考使用默认 SdkExact 的 `pipeline.Decode(pipeline.PredictRaw(frame))`. INT8 与 SDK 浮点舍入差异使它们不保证 bit exact. DFL 同分 NMS 采用稳定插入顺序, 可能与官方 NumPy 原始同分排序选中不同坐标框. 统一入口保留推理及解码合同; 指定模型/输入的有限RK3588包消费验证见[候选验收范围](../README.md#040-有限验证), 不代表标注集精度或任意模型兼容性.
 
 ## 输入和模型边界
 

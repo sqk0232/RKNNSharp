@@ -1,6 +1,6 @@
 # RKNN DFL 检测契约（已验证指定 YOLOv8n）
 
-检测公开入口为 `RknnPipeline(ModelType.YoloV8Detection, modelPath, config)`；配置使用RknnPipelineConfig并支持输入尺寸推断，公开RknnModel用于原始张量。检测profile保持内部实现，native ABI继续为2。
+检测公开入口为 `RknnPipeline(ModelType.YoloV8Detection, modelPath, config)`, 配置统一使用 `RknnPipelineConfig`; 本文输入尺寸推断与公开 `RknnModel` 属于0.4.0新增功能, 迁移及验证边界见[0.4 说明](migration-0.4.md). 检测路径包含 INT8 借用输出和有效 profile 绑定缓存, 保留显式解码契约与 native ABI 2; [0.3 迁移历史](migration-0.3.md)保留.
 
 已有硬件验收仅覆盖既有社区YOLOv8n `61d612e0…145b5` 的9输出契约. YOLO11只有已下载ONNX的结构分析和同契约代码, 未转换或板端验证, 不宣称已完成硬件兼容. 库包不包含模型权重. 其他YOLOv8规格、导出选项和输入规范须分别验证.
 

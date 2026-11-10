@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-11
+
+- 本版本新增功能及有限验证范围如下. 0.3.0 的已发布历史保留; 升级说明见 [0.3 → 0.4 迁移](docs/migration-0.4.md).
+- 新增公开原始张量入口 `RknnModel` 和构造时建立的固定会话池 `RknnModelOptions.SessionPoolSize` (默认 1). 复制会话共享权重, 输入输出资源独立; 池耗尽等待, Dispose 拒绝排队调用并等待在途调用. 旧桥接缺少复制导出时仅在构造期独立创建并记录可选警告.
+- 新增从模型绑定输入尺寸的 `RknnPipelineConfig(classCount, ...)`, 输入 metadata 属性及显式前处理选项. 显式尺寸构造保留; 当前只支持 RGB、Letterbox、ModelDefault, 其他组合在创建会话前明确拒绝.
+- 新增显式 NHWC 动态形状重载及结果输入属性快照. 原生 ABI 仍为 2, 增加 `rks_dup_context`、`rks_is_dynamic`、`rks_set_input_shapes`; 复用既有上下文, 在具体受支持形状上准备输入及显式动态输出绑定.
+- 修复原生 hardware smoke 对少于六通道输出的越界检查, 补充独立边界回归; 稳定调度禁用路径零分配测试的预热和测量边界.
+- 默认 pack 继续核验受测桥接 SHA256. 动态模型概率输出须通过 RawTensor 与应用显式概率后处理使用; 产品 V5 默认仍为 raw logits.
+- 官方0.3.0/候选真实包在同Runtime的指定静态V5/V8n、固定bus帧上, 3/9头字节hash及几何一致, 均4 person/1 bus; 3600正式性能样本未观察到一致回退. 候选动态三形状/池1/3、180次并发全头/metadata/Transform对照、无效形状恢复及5次建销有限验证通过. 候选V8n同一进程590.001秒内34598次有效Predict正常退出, DMA随pipeline/fixture释放为1/0; 保留到进程退出的两个DRM/RGA设备句柄与0.3.0同阶段一致, 有限循环未新增累积, 不宣称全部原生资源归零、无泄漏或长期稳定性.
+- RGA自然/合成夹具三路像素零差, 结合实际包旧新输出/几何零差, 未发现新增包装/版本回归. 精确vendor插值合同仍未匹配; 理想half-pixel差异本身不等于本次新增产品缺陷. mAP缺独立标注, 任意模型/BSP和完整像素精度未验; 最终候选与发布放行仍待验收, 详见[候选验收范围](README.md#040-有限验证).
+
 ## [0.3.0] - 2026-11-10
 
 ### Changed
@@ -77,3 +88,5 @@
 [0.3.0]: https://github.com/sqk0232/RKNNSharp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sqk0232/RKNNSharp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sqk0232/RKNNSharp/releases/tag/v0.1.0
+
+[0.4.0]: https://github.com/sqk0232/RKNNSharp/compare/v0.3.0...v0.4.0
