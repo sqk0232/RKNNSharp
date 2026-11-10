@@ -1,0 +1,139 @@
+name: Publish NuGet
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Stable Release tag to publish (vMAJOR.MINOR.PATCH)'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: "nuget-rknnsharp-${{ github.event.release.tag_name || inputs.tag }}"
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Release events use a tag ref; only manual dispatch is restricted to main.
+    if: >-
+      github.repository == 'sqk0232/RKNNSharp' &&
+      ((github.event_name == 'release' && !github.event.release.draft && !github.event.release.prerelease) ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify approved Release assets and exact source CI
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          ./scripts/verify-nuget-release.ps1 -Tag $env:RELEASE_TAG -DownloadDirectory (Join-Path $env:RUNNER_TEMP 'nuget-release')
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '10.0.403'
+      - name: Refuse an already public version
+        env:
+          PACKAGE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          $uri = "https://api.nuget.org/v3-flatcontainer/rknnsharp/$env:PACKAGE_VERSION/rknnsharp.$env:PACKAGE_VERSION.nupkg"
+          try {
+            $response = Invoke-WebRequest -Uri $uri -Method Head -TimeoutSec 30
+          } catch {
+            if (!$_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 404) { throw }
+            $response = $null
+          }
+          if ($response) { throw "RKNNSharp $env:PACKAGE_VERSION is already public. Stop and compare contents; this workflow never overwrites or skips duplicates." }
+      # Configure nuget.org once: sqk0232/RKNNSharp, publish.yml, environment blank,
+      # policy owner/user sqk0232, push new versions of the exact RKNNSharp package.
+      # Release approval/ARM board acceptance happens before publishing the GitHub Release.
+      - name: NuGet login (OIDC)
+        id: login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
+        with:
+          user: sqk0232
+      - name: Push package and matching symbols
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+          NUGET_SYMBOL_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+          PACKAGE_VERSION: ${{ steps.release.outputs.version }}
+          PACKAGE_DIRECTORY: ${{ steps.release.outputs.package_directory }}
+        run: |
+          # SDK 10.0.403 reads keys from the process environment; never print/store them.
+          $package = Join-Path $env:PACKAGE_DIRECTORY "RKNNSharp.$env:PACKAGE_VERSION.nupkg"
+          dotnet nuget push $package --source https://api.nuget.org/v3/index.json --timeout 120
+          if ($LASTEXITCODE -ne 0) { throw 'NuGet push failed; inspect both package and symbol status before retrying.' }
+          "Push accepted for RKNNSharp $env:PACKAGE_VERSION and its matching snupkg. Public indexing is checked separately below." |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+      - name: Read public version, package and README once
+        env:
+          PACKAGE_VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
+          PACKAGE_DIRECTORY: ${{ steps.release.outputs.package_directory }}
+        run: |
+          function Get-PublicResponse([string] $Uri, [string] $OutFile = '') {
+            try {
+              if ($OutFile) { return (Invoke-WebRequest -Uri $Uri -OutFile $OutFile -PassThru -TimeoutSec 30) }
+              return (Invoke-WebRequest -Uri $Uri -TimeoutSec 30)
+            } catch {
+              if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) { return $null }
+              throw
+            }
+          }
+          $base = "https://api.nuget.org/v3-flatcontainer/rknnsharp/$env:PACKAGE_VERSION"
+          $metadata = Get-PublicResponse "$base/rknnsharp.nuspec"
+          if ($metadata) {
+            [xml] $nuspec = $metadata.Content
+            if ($nuspec.package.metadata.id -cne 'RKNNSharp' -or
+                $nuspec.package.metadata.version -cne $env:PACKAGE_VERSION -or
+                $nuspec.package.metadata.repository.commit -cne $env:SOURCE_COMMIT) {
+              throw 'Public nuspec identity, version or repository commit differs from this Release.'
+            }
+            'Public nuspec: exact package/version/source commit verified.' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+          } else {
+            'Public nuspec: pending indexing (404).' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+            Write-Output '::warning::Public nuspec is pending indexing.'
+          }
+          $publicPackage = Join-Path $env:RUNNER_TEMP 'public.nupkg'
+          $download = Get-PublicResponse "$base/rknnsharp.$env:PACKAGE_VERSION.nupkg" $publicPackage
+          if ($download) {
+            ./scripts/verify-nuget-release.ps1 -Tag "v$env:PACKAGE_VERSION" -PackageDirectory $env:PACKAGE_DIRECTORY -SourceCommit $env:SOURCE_COMMIT -NativeProvenanceFile (Join-Path $env:PACKAGE_DIRECTORY 'source-native-provenance.json') -PublishedPackage $publicPackage
+            'Public package: all approved entry lengths/SHA256, including NUGET_README.md, verified (repository signature allowed).' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+          } else {
+            'Public package/README bytes: pending indexing (404).' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+            Write-Output '::warning::Public package and README byte verification are pending indexing.'
+          }
+          $gallery = Get-PublicResponse "https://www.nuget.org/packages/RKNNSharp/$env:PACKAGE_VERSION"
+          if ($gallery) {
+            $identity = '<meta\s+property="og:title"\s+content="RKNNSharp ' + [regex]::Escape($env:PACKAGE_VERSION) + '"\s*/?>'
+            if ($gallery.Content -notmatch $identity) { throw 'Gallery page does not identify the requested package version; possible fallback to another version.' }
+            if ($gallery.Content -match 'id="readme-container"') {
+              'Gallery: target version identity and README display area verified; rendered text was not compared.' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+            } else {
+              'Gallery: target version found; rendered README not yet present.' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+              Write-Output '::warning::Target version gallery is visible, but its README display area is not yet present.'
+            }
+          } else {
+            'Gallery: pending public availability (404).' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+            Write-Output '::warning::Target version gallery is pending public availability.'
+          }
+          'Symbol acceptance by push does not prove symbol indexing is complete.' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
