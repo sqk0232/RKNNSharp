@@ -37,9 +37,9 @@ public sealed class SingleFrameSampleTests
     [Fact]
     public void DflExampleIsTheDocumentedNineOutputContract()
     {
-        RknnPipelineConfig config = SingleFrameSample.CreateExplicitDfl640Example();
-        Assert.Equal(640, config.InputWidth);
-        Assert.Equal(640, config.InputHeight);
+        RknnPipelineConfig config = SingleFrameSample.CreateExplicitDflExample();
+        Assert.Equal(0, config.InputWidth);
+        Assert.Equal(0, config.InputHeight);
         Assert.Equal(80, config.ClassCount);
         Assert.Equal(16, config.RegMax);
         Assert.Equal(0.25f, config.ConfidenceThreshold);
@@ -53,6 +53,10 @@ public sealed class SingleFrameSampleTests
         Assert.Equal([2, 5, 8], config.Heads.Select(head => head.ScoreSumOutputIndex));
 
         var input = new TensorInfo(0, "images", [1, 640, 640, 3], 640u * 640 * 3, 1, 2, 2, -128, 1f / 255f);
+        config = config.Bind(input);
+        Assert.Equal(640, config.InputWidth);
+        Assert.Equal(640, config.InputHeight);
+        Assert.Equal(1, config.BatchSize);
         var outputs = new TensorInfo[9];
         foreach (YoloDetectionHead head in config.Heads)
         {

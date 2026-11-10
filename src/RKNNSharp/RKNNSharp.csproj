@@ -37,7 +37,7 @@
                  Condition="'$(_RKNNSharpUsingBundledNative)' == 'true'">
       <Output TaskParameter="Hash" PropertyName="_RKNNSharpBundledNativeHash" />
     </GetFileHash>
-    <Error Condition="'$(_RKNNSharpUsingBundledNative)' == 'true' And '$(_RKNNSharpBundledNativeHash)' != 'fc31bf63de75a64d40b5432448475bacf2e1512c84aa194ca66bbc66f56c3f6a'"
+    <Error Condition="'$(_RKNNSharpUsingBundledNative)' == 'true' And '$(_RKNNSharpBundledNativeHash)' != '7d648fd8032c047589ea7388bdceb229ae42870a7a00159387ed01ba9a3e74f2'"
            Text="Bundled RKNNSharp native SHA256 does not match the verified release asset. Rebuild and validate the bridge, then update its provenance and expected hash together." />
   </Target>
 </Project>

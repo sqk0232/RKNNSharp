@@ -4,6 +4,8 @@ namespace RKNNSharp;
 
 internal static partial class Log
 {
+    [LoggerMessage(1003, LogLevel.Warning, "Native rks_dup_context export is unavailable. Creating {SessionCount} additional sessions during construction without shared weights. Memory usage will be higher.")]
+    internal static partial void UnsharedPool(ILogger logger, int sessionCount);
     [LoggerMessage(1002, LogLevel.Information, "RKNN pipeline created for {ModelType}.")]
     internal static partial void PipelineCreated(ILogger logger, ModelType modelType);
 

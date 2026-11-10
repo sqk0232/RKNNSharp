@@ -41,7 +41,9 @@ typedef struct {
 } rks_run_info;
 /* Status 0=success, -1=invalid/unsupported/hardware failure; details in
    rks_last_error (thread local, valid until next failing call on this thread).
-   Create supports static NHWC RGB INT8 with zp=-128/scale=1/255 only.
+   Static execution supports NHWC RGB INT8 with zp=-128/scale=1/255 only.
+   Dynamic models may load without prepared input DMA. Set a supported shape
+   before running; loading does not imply that its input contract can execute.
    No normalization, color-order assumptions or CPU fallback are hidden. */
 RKS_API const char* rks_last_error(void);
 RKS_API uint32_t rks_abi_version(void);
@@ -49,6 +51,15 @@ RKS_API uint32_t rks_abi_version(void);
    Bit 0 indicates rks_run_float_into with the complete contract below. */
 RKS_API uint32_t rks_capabilities(void);
 RKS_API int rks_create(const char* model_path, rks_session** session);
+/* Optional additive ABI-2 exports. Dup shares model weights via
+   rknn_dup_context, with independent input/output resources and destruction.
+   Shape changes use rknn_set_input_shapes on the existing context. Currently
+   one input is supported. Only index/n_dims/dims are read from each shape.
+   Once SDK shape setting begins, failure invalidates run readiness until a
+   successful change. Argument rejection leaves the previous shape intact. */
+RKS_API int rks_dup_context(rks_session* source, rks_session** session);
+RKS_API uint32_t rks_is_dynamic(rks_session*);
+RKS_API int rks_set_input_shapes(rks_session*, uint32_t input_count, const rks_tensor* inputs);
 /* Caller serializes destroy with every API call; it must never race new calls.
    Session operations serialize internally. Different sessions are independent. */
 RKS_API void rks_destroy(rks_session* session);

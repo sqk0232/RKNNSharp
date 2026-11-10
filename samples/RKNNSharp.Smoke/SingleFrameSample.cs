@@ -21,7 +21,7 @@ internal static class SingleFrameSample
           MODEL --contract-compare FIXTURE BASELINE_DLL [iterations=12] [EXPECTED_SHA256]
 
         codec: h264|h265; colorspace: auto|601limit|601full|709limit
-        decoder: v5 (default) selects YoloV5Detection; dfl selects explicit 640/80 nine-output YoloV8Detection.
+        decoder: v5 (default) selects YoloV5Detection; dfl selects explicit 80-class nine-output YoloV8Detection.
         To select dfl, pass codec and colorspace before it. Neither decoder infers a model from its file name.
         mode: detect|run|compare|pipeline|replay; core: Auto|Core0|Core1|Core2|All
         See samples/RKNNSharp.Smoke/README.md for ranges, prerequisites and ownership.
@@ -47,8 +47,8 @@ internal static class SingleFrameSample
         return Detect(pipeline, source, options);
     }
 
-    /// <summary>文档中的 640×640、80 类、regMax 16、含 score-sum 的九输出示例. 不按文件名选择.</summary>
-    internal static RknnPipelineConfig CreateExplicitDfl640Example() => ExampleConfigurations.Dfl();
+    /// <summary>80 类、regMax 16、含 score-sum 的九输出示例. 输入尺寸由模型提供.</summary>
+    internal static RknnPipelineConfig CreateExplicitDflExample() => ExampleConfigurations.Dfl();
 
     private static int Detect(RknnPipeline pipeline, string source, SingleFrameOptions options)
     {

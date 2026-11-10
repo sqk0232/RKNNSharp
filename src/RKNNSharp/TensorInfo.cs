@@ -27,4 +27,8 @@ public sealed class TensorInfo
 public sealed record TensorOutput(TensorInfo Info, ReadOnlyMemory<float> Values);
 /// <summary>RuntimeOutputsMs 是原生输出获取/转换/释放. ManagedOutputsMs 是 Run 的快照分配/固定/复制, RunInto 的验证/固定/兼容复制, 或 Detect 的指针/代数校验.</summary>
 public readonly record struct RunTimings(double PreprocessMs, double InferenceMs, double RuntimeOutputsMs, double ManagedOutputsMs);
-public sealed record InferenceResult(IReadOnlyList<TensorOutput> Outputs, LetterboxTransform Transform, RunTimings Timings);
+public sealed record InferenceResult(IReadOnlyList<TensorOutput> Outputs, LetterboxTransform Transform, RunTimings Timings)
+{
+    /// <summary>本次借用会话的实际输入属性快照. 旧调用方手工构造结果时可省略.</summary>
+    public IReadOnlyList<TensorInfo>? Inputs { get; init; }
+}

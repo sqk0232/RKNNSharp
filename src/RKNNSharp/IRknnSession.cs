@@ -9,6 +9,9 @@ internal interface IRknnSession : IDisposable
     NpuCoreMask CoreMask { get; }
     FloatOutputMode OutputMode { get; }
     CallerThreadPlacement? CallerThreadPlacement { get; }
+    bool IsDynamic => false;
+    IRknnSession Duplicate() => throw new EntryPointNotFoundException("rks_dup_context is unavailable.");
+    void SetInputShape(IReadOnlyList<uint> dimensions) => throw new NotSupportedException("rks_set_input_shapes is unavailable.");
     InferenceResult Run(DmaFrame frame);
     InferenceResult RunInto(DmaFrame frame, IReadOnlyList<Memory<float>> outputBuffers);
     DetectionResult Detect(DmaFrame frame, YoloV5Profile profile);

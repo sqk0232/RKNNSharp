@@ -19,15 +19,7 @@ internal sealed class YoloDetectionProfile
     /// <summary>验证原生输入约束及映射的标准 NCHW affine INT8 输出, 不依据模型名称推断格式.</summary>
     public void ValidateModel(IReadOnlyList<TensorInfo> inputs, IReadOnlyList<TensorInfo> outputs)
     {
-        ArgumentNullException.ThrowIfNull(inputs);
-        if (inputs.Count != 1 || inputs[0] is not { } input || input.Index != 0 ||
-            input.Layout != 1 || input.DataType != 2 || input.Quantization != 2 ||
-            input.ZeroPoint != -128 || input.Scale != 1f / 255 ||
-            !input.Dimensions.SequenceEqual(new uint[] { 1, (uint)Config.InputHeight, (uint)Config.InputWidth, 3 }) ||
-            input.ElementCount != (uint)(Config.InputWidth * Config.InputHeight * 3))
-        {
-            throw new ArgumentException("DFL detection requires the verified INT8 affine NHWC RGB input contract: zeroPoint=-128, scale=1/255.", nameof(inputs));
-        }
+        NativeInputContract.Validate(inputs, Config.InputWidth, Config.InputHeight);
         ValidateOutputs(outputs);
     }
 

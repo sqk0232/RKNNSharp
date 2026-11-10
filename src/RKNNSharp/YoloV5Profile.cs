@@ -54,16 +54,8 @@ internal sealed class YoloV5Profile
 
     public void ValidateModel(IReadOnlyList<TensorInfo> inputs, IReadOnlyList<TensorInfo> outputs)
     {
-        ArgumentNullException.ThrowIfNull(inputs);
         ArgumentNullException.ThrowIfNull(outputs);
-        if (inputs.Count != 1 || inputs[0].Layout != 1 || inputs[0].DataType != 2 ||
-            inputs[0].Quantization != 2 || inputs[0].ZeroPoint != -128 ||
-            inputs[0].Scale != 1f / 255 ||
-            !inputs[0].Dimensions.SequenceEqual(new uint[] { 1, (uint)InputHeight, (uint)InputWidth, 3 }) ||
-            inputs[0].ElementCount != (uint)(InputWidth * InputHeight * 3))
-        {
-            throw new ArgumentException("YOLO input requires the verified INT8 affine NHWC RGB zeroPoint=-128 scale=1/255 contract.");
-        }
+        NativeInputContract.Validate(inputs, InputWidth, InputHeight);
         ValidateOutputs(outputs);
     }
 

@@ -1,8 +1,8 @@
 {
     "packageVersion":  "0.3.0",
     "asset":  "librknnsharp_native.so",
-    "sha256":  "fc31bf63de75a64d40b5432448475bacf2e1512c84aa194ca66bbc66f56c3f6a",
-    "bytes":  72976,
+    "sha256":  "7d648fd8032c047589ea7388bdceb229ae42870a7a00159387ed01ba9a3e74f2",
+    "bytes":  87408,
     "abi":  2,
     "architecture":  "ELF64 AArch64 Linux",
     "license":  "MIT (RKNNSharp bridge only; vendor libraries are not included)",
@@ -12,15 +12,17 @@
     "sourceIdentity":  "sources records exact tested working-tree byte SHA256; sourceRepositoryLfSha256 records the same source after Git CRLF-to-LF normalization. The tested source was not a clean release commit.",
     "sources":  {
                     "native/CMakeLists.txt":  "6a8f367ead1419590b52d1012b457031cd9aba77deaa591d66ad8dbd3e0a986f",
-                    "native/include/rknnsharp.h":  "1eccc775e6ddfbe11bfec4461856c889ae553bd012cb6446461f6717617f61f1",
-                    "native/src/rknnsharp.cpp":  "a3907ed7b08e8b1d634a49fb71d737fe7013f07c7a0a3065235e110a42ea54ab",
-                    "native/src/source_import_cache.h":  "070fafcb586777d266a0d6d68a6a700938889bf4500ab15b0583b68077936c9f"
+                    "native/include/rknnsharp.h":  "2eae5ffaaa3738d0f9d58ee572a21f26c28858d871802069de0b117fd8af9278",
+                    "native/src/rknnsharp.cpp":  "4d6bbbec91e24800100cc94f2d066b439a4d45a15535ae912365ea7675b2056f",
+                    "native/src/source_import_cache.h":  "49e9270083c9973f4f42e4d0176da0e807720a86d49c33f5fa39199932c6c07c",
+                    "native/tests/source_import_cache_regression.cpp":  "7c1ba0675a882caf407d50923455708cab94c2b8c3987fdf5ea931c1d70f6e0c"
                 },
     "packPolicy":  "Default pack checks the bundled binary SHA256. An explicit RKNNSharpNativeLibraryPath bypasses that bundled hash check; the caller must verify its own build and ABI. Rebuilding instructions: docs/hardware.md.",
     "sourceRepositoryLfSha256":  {
                                      "native/CMakeLists.txt":  "4c366f89454e6b16f69485f4685932fb19f62e40d05ca5f80132f2944640f7ec",
-                                     "native/include/rknnsharp.h":  "b7df37fccd23ac19abe478e7c169705dd6b63b893dc12ef330bd5b5c5bc45465",
-                                     "native/src/rknnsharp.cpp":  "2cf3cb955dcc8066e75ee5dd901079fcbd706392f1d21cf2af48d29ff615efc1",
-                                     "native/src/source_import_cache.h":  "070fafcb586777d266a0d6d68a6a700938889bf4500ab15b0583b68077936c9f"
+                                     "native/include/rknnsharp.h":  "e1acc7550e413233ed5323ab55c537473bf582659ba634b62f8aaed5cebb9bf5",
+                                     "native/src/rknnsharp.cpp":  "986ac914d09e6bbed3e72fff712ef84f99da73dc938e8ac541da3b524b541971",
+                                     "native/src/source_import_cache.h":  "070fafcb586777d266a0d6d68a6a700938889bf4500ab15b0583b68077936c9f",
+                                     "native/tests/source_import_cache_regression.cpp":  "6fb6646d2b9f4efbcb00db236b7e3c31ef6f35ff3867025b0a8c27dd04855ea6"
                                  }
 }

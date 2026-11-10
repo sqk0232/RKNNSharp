@@ -41,7 +41,7 @@ dotnet run --project samples/RKNNSharp.Smoke -c Release --no-build -- --help
 dotnet add path/to/YourApp.csproj reference src/RKNNSharp/RKNNSharp.csproj
 ```
 
-`path/to/YourApp.csproj` 替换为自己的 `net10.0` 应用项目。0.3.0 使用下列统一入口（相对官方 0.2.0 为破坏性 API 更新）：
+`path/to/YourApp.csproj` 替换为自己的 `net10.0` 应用项目。下面使用模型尺寸推断与统一检测入口：
 
 ```csharp
 using RKNNSharp;
@@ -51,7 +51,7 @@ public static class FrameDetection
     public static DetectionResult DetectFrame(string modelPath, DmaFrame frame)
     {
         // 官方 640 anchors 仅为示例假设，须确认与自己的模型一致。
-        var config = new RknnPipelineConfig(640, 640, 80, anchors:
+        var config = new RknnPipelineConfig(classCount: 80, anchors:
         [
             [new(10, 13), new(16, 30), new(33, 23)],
             [new(30, 61), new(62, 45), new(59, 119)],
@@ -66,11 +66,42 @@ public static class FrameDetection
 }
 ```
 
-普通非检测模型使用 `new RknnPipeline(ModelType.RawTensor, modelPath)`，通过 `PredictRaw` 或 `PredictRawInto` 获取张量；此分支不提供检测解码。旧模型构造和 profile API 不再公开。
+加载后从模型读取宽高、batch、布局、精度和量化属性，通过 `pipeline.InputWidth`、`InputHeight`、`BatchSize` 和 `InputTensor` 查看。检测配置的实际尺寸在 `pipeline.Config` 中。默认采用 RGB、等比 letterbox 和 `NormalizationMode.ModelDefault`，沿用模型量化契约，不追加均值/方差。BGR、拉伸和额外归一化当前会明确报不支持。
+
+普通非检测模型使用 `new RknnPipeline(ModelType.RawTensor, modelPath)`，通过 `PredictRaw` 或 `PredictRawInto` 获取张量。也可通过公开的 `RknnModel(modelPath)` 调用 `Run` / `RunInto` 获取原始张量，输入限制相同。
 
 采集层准备 `modelPath` 和 `frame` 后调用此方法，持有 sample/FD 至同步返回。连续推理应将 pipeline 创建移到循环外，全部调用结束后释放。完整的 DMA 描述符、绘框、`PredictRaw`/`PredictRawInto` 缓冲复用和并发契约见 [API 说明](https://github.com/sqk0232/RKNNSharp/blob/main/docs/api.md)。DFL 三尺度输出使用 [ModelType.YoloV8Detection](https://github.com/sqk0232/RKNNSharp/blob/main/docs/yolo-detection.md)，不能仅凭 YOLO 名称推断模型兼容。
 
 `PredictRaw`/`PredictRawInto` 默认保留 SDK float 转换。可通过统一构造入口的 `RknnModelOptions.OutputMode` 显式选择 `FloatOutputMode.PreferFastInt8`，允许合适的标准 INT8 head 使用快速转换，其他 head 仍由 SDK 转换；`Predict` 不受影响。该模式可能有浮点舍入差，不能保证 SDK 逐 bit 一致或任意阈值附近的检测决策相同；使用前应验证自己的模型与阈值。旧 native 继续支持默认模式，缺少可选配置导出时显式快速请求会报不支持。调用示例和精度限制见 [可选模式契约](https://github.com/sqk0232/RKNNSharp/blob/main/docs/api.md#显式可选的快速浮点转换)。
+
+## 会话池（SessionPoolSize）
+
+`RknnModelOptions.SessionPoolSize` 默认 **1**。模型构造时一次建好 N 个原生会话，推理只借用和归还已有会话，不按帧或输入形状重建上下文，避免反复创建的内存与时延开销，并为并发调用提高吞吐。
+
+低帧率、单线程顺序调用保留 1 可节省内存。单路高帧率、多路相机，或一帧需要多个模型/多个调用并发时，可手动设为 **3**；不需要多路图像源才有用。RK3588 有 3 个 NPU 核，3 是常用的调优上限，并非 API 硬上限。池按模型实例独立，多个模型须分别配置；仅增加池大小不会自动并行顺序调用，也不会自动分配不同核心，所有会话沿用同一 `CoreMask`。
+
+沿用上面的检测配置 `config`，通过构造参数 `options` 设置；此选项属于 `RknnModelOptions`，不属于 `RknnPipelineConfig`：
+
+```csharp
+var options = new RknnModelOptions { SessionPoolSize = 3 };
+using var pipeline = new RknnPipeline(
+    ModelType.YoloV5Detection, modelPath, config, options);
+```
+
+原始张量入口同样支持 `new RknnModel(modelPath, options)`。取值为正 `int`（1 至 `int.MaxValue`），没有额外的软件上限；小于 1 时，构造在创建原生会话前抛出 `ArgumentOutOfRangeException`。较大的值仍受设备资源限制，创建失败会清理已创建的会话。
+
+首个会话加载模型，其余会话通过 `rks_dup_context` 调用 `rknn_dup_context` 复制上下文并共享权重。每个会话的输入、输出缓冲互相隔离，可并发执行；调用方仍须保证输入 DMA 的存活和生产者同步，并为并发调用提供独占的输出缓冲。池用尽时调用方阻塞等待归还，**没有超时或取消参数**。
+
+`Dispose` 开始后拒绝新调用并唤醒排队调用，两者在借用会话时抛出 `ObjectDisposedException`；等待全部在途推理归还后，按构造的逆序销毁全部会话（复制会话先于主会话），每个会话只销毁一次，重复释放安全。若旧 `librknnsharp_native.so` 缺少 `rks_dup_context` 导出，构造时改为逐个独立创建其余会话，不共享权重、内存占用更高，并通过 `options.LoggerFactory` 在启用 Warning 日志时记录一次警告；默认空日志不输出。此回退只发生在构造期，推理期仍不重建。真实复制错误会使构造失败并清理已创建会话。
+
+已验证的静态板测条件为 RK3588、RKNN Runtime 2.3.2、驱动 0.9.8，YOLOv5s / YOLOv8n INT8 模型，复用单张 512×384 RGB888 图片（模型输入 640×640）。性能测试未挂载诊断 `LD_PRELOAD`，每组预热 100 + 正式 300 帧，共 3 轮；下表合并各组 900 个正式样本，FPS 为总帧数除以总用时，单帧均值为每次调用的平均耗时，包含预处理、推理和检测后处理，不含采集/解码等待及模型构造。
+
+| 模型 | 池 1 / 单线程 FPS | 单帧均值 ms | 池 3 / 三线程 FPS | 单帧均值 ms |
+| --- | ---: | ---: | ---: | ---: |
+| YOLOv5s INT8 | 50.82 | 19.67 | 138.72 | 21.57 |
+| YOLOv8n INT8 | 52.34 | 19.10 | 148.00 | 20.18 |
+
+池 3 的收益体现在并行吞吐，不能把总 FPS 的倒数当作单请求延迟；轮间存在波动，不保证其他模型或设备获得相同收益。同一设备、Runtime、驱动及静态模型的资源与一致性验证另确认：相对池 3 逐会话独立创建，共享权重按 dma-buf 统计节省 DMA 内存约 16.2 MiB（YOLOv5s）/ 6.5 MiB（YOLOv8n）；池 1/3、单线程/多线程共 1210 次结果比较全部一致；150 次创建/推理/释放循环后，原生上下文与 DMA 内存不累积。这些有限测试不代表动态维或长期运行均已验证。
 
 ## NuGet 安装与本地打包
 
@@ -91,7 +122,7 @@ dotnet publish path/to/YourApp.csproj -c Release -r linux-arm64 --self-contained
 dotnet pack src/RKNNSharp/RKNNSharp.csproj -c Release -o publish/nuget
 ```
 
-默认输入为 `native/prebuilt/linux-arm64/librknnsharp_native.so`，pack 校验其 SHA256 `fc31bf63de75a64d40b5432448475bacf2e1512c84aa194ca66bbc66f56c3f6a`；[来源记录](https://github.com/sqk0232/RKNNSharp/blob/main/native/prebuilt/linux-arm64/provenance.json)绑定 ABI 2、受测源码 hash 与环境。更新源码后须重新构建和验收，并一并更新预置资产、来源记录和预期 hash。自建桥接可用 `-p:RKNNSharpNativeLibraryPath=/absolute/path/librknnsharp_native.so` 指定，此 override 只检查文件存在，不要求匹配预置 hash，调用方负责来源及硬件验证。缺库或默认 hash 不符时打包失败。消费本地包时，在安装命令末尾添加 `--source publish/nuget`，并确保该包源路径相对于执行目录有效。
+默认输入为 `native/prebuilt/linux-arm64/librknnsharp_native.so`，pack 校验其 SHA256 `7d648fd8032c047589ea7388bdceb229ae42870a7a00159387ed01ba9a3e74f2`；[来源记录](https://github.com/sqk0232/RKNNSharp/blob/main/native/prebuilt/linux-arm64/provenance.json)绑定 ABI 2、受测源码 hash 与环境。更新源码后须重新构建和验收，并一并更新预置资产、来源记录和预期 hash。自建桥接可用 `-p:RKNNSharpNativeLibraryPath=/absolute/path/librknnsharp_native.so` 指定，此 override 只检查文件存在，不要求匹配预置 hash，调用方负责来源及硬件验证。缺库或默认 hash 不符时打包失败。消费本地包时，在安装命令末尾添加 `--source publish/nuget`，并确保该包源路径相对于执行目录有效。
 
 原生包构建基线为 Linux ARM64、GCC 11.4、Ubuntu 22.04.5/glibc 2.35，硬件为 RK3588。桥接库直接符号要求为 GLIBC ≥2.33、GLIBCXX ≥3.4.21、CXXABI ≥1.3.9；这不等于整个厂商依赖链在这些最低版本上都已验证。已测组合使用 RKNN Runtime 2.3.2 / NPU driver 0.9.8、RGA 1.10.1_[3] / driver 1.3.7；这不是所有 Linux ARM64、其他 glibc/BSP、RK3588S 或 RKNN 版本均已验证的保证。桥接库不带构建机 RPATH/RUNPATH。发布前应使用实际 NuGet 消费项目在目标板验证加载、ABI 2 及有限推理，不把开发设备的绝对 SDK 路径打入包。
 
@@ -106,7 +137,7 @@ dotnet pack src/RKNNSharp/RKNNSharp.csproj -c Release -o publish/nuget
 | 平台/原生契约 | net10.0、Linux ARM64/RK3588、ABI 2 | 保留；分发匹配的已验桥接库 |
 | 托管依赖 | Logging.Abstractions 10.0.0 | 保留，默认空日志 |
 
-移除的五个公开类型及具体调用映射见[迁移指南](https://github.com/sqk0232/RKNNSharp/blob/main/docs/migration-0.3.md)。这是源码和二进制不兼容的托管 API 变化，需要重新编译；官方 0.2.0 没有 `ModelType`，不要把开发中间枚举名称当作版本迁移历史。
+上述表格保留0.3.0迁移历史；新增公开的RknnModel原始张量入口、会话池与输入推断见上文，检测profile仍为内部实现。
 
 ## 在目标板运行样例
 
@@ -243,8 +274,8 @@ confidence=0.25、NMS=0.45、单标签、最多 300 框，该版本默认使用 
 ## 限制与排错
 
 - `DmaFrame` 只借用 FD，不延长生产者生命周期；仅支持线性、单 FD、offset=0 的 NV12/RGB888/RGBA8888。NV12 必须明确色域。
-- 当前原生输入只接受静态 NHWC RGB INT8、zeroPoint=-128、scale=`float(1/255)`。YOLOv5 helper 要求三个标准 NCHW INT8 raw-logit head 和显式 anchors，不猜类别名称。
-- 硬件调用同步且中途不可取消；同一模型实例的推理与释放串行。`PredictRaw` 返回独立快照，`PredictRawInto` 结果随调用方缓冲区下一次写入而改变。
+- 每次运行要求具体 batch=1、NHWC RGB INT8 输入、zeroPoint=-128、scale=`float(1/255)`; 动态模型须设置声明支持的具体形状。YOLOv5 helper 要求三个标准 NCHW INT8 raw-logit head 和显式 anchors, 概率头使用 RawTensor 及应用显式后处理。
+- 硬件调用同步且中途不可取消；同一模型实例构造时建立固定会话池，默认 1 个，池耗尽时等待归还，释放等待在途调用。`PredictRaw` 返回独立快照，`PredictRawInto` 结果随调用方缓冲区下一次写入而改变。
 - `DllNotFoundException`：检查运行平台、两个自编译 `.so` 及其 `ldd` 依赖；`EntryPointNotFoundException`：检查托管库与原生 ABI 是否匹配。
 - 采集失败：检查 `gst-inspect-1.0 mppvideodec`、输入编码与线性 DMA 布局。色域拒绝时核实来源，不按分辨率猜测。
 - 模型契约拒绝：核对输入量化、布局、输出 head 和后处理配置，不以更改阈值绕过。

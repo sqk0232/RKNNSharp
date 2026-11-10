@@ -17,20 +17,176 @@ public sealed class RknnPipelineTests
         new(type, "controlled.rknn", config ?? (type == ModelType.RawTensor ? null : Config(type)), null, logger, (_, _) => session);
 
     [Fact]
-    public void PublicSurfaceHasOneConstructorAndNoLegacyModelEntrypoints()
+    public void PublicSurfaceRetainsUnifiedConstructorAndRawModelEntrypoint()
     {
         Assert.Equal(new[] { "YoloV5Detection", "YoloV8Detection", "RawTensor" }, Enum.GetNames<ModelType>());
         Assert.Equal(new[] { 0, 1, 2 }, Enum.GetValues<ModelType>().Select(value => (int)value).ToArray());
         var exported = typeof(RknnPipeline).Assembly.GetExportedTypes();
-        foreach (string old in new[] { "RknnModel", "YoloV5Profile", "YoloDetectionProfile", "YoloDetectionConfig", "YoloDetectionOutputFormat" })
+        foreach (string old in new[] { "YoloV5Profile", "YoloDetectionProfile", "YoloDetectionConfig", "YoloDetectionOutputFormat" })
         { Assert.DoesNotContain(exported, type => type.Name == old); }
         var constructor = Assert.Single(typeof(RknnPipeline).GetConstructors());
         Assert.Equal([typeof(ModelType), typeof(string), typeof(RknnPipelineConfig), typeof(RknnModelOptions), typeof(ILogger)],
             constructor.GetParameters().Select(parameter => parameter.ParameterType));
         Assert.True(constructor.GetParameters()[2].IsOptional);
         Assert.DoesNotContain(typeof(RknnPipeline).GetMethods(), method => method.Name is "Run" or "RunInto" or "Detect");
-        foreach (Type contract in new[] { typeof(DmaFrame), typeof(DmaImage), typeof(DetectionResult), typeof(InferenceResult), typeof(TensorInfo), typeof(RknnModelOptions) })
+        foreach (Type contract in new[] { typeof(RknnModel), typeof(DmaFrame), typeof(DmaImage), typeof(DetectionResult), typeof(InferenceResult), typeof(TensorInfo), typeof(RknnModelOptions) })
         { Assert.Contains(contract, exported); }
+        Assert.NotNull(typeof(RknnModel).GetConstructor([typeof(string)]));
+    }
+
+    private static RknnPipelineConfig AutoConfig(ModelType type)
+    {
+        var explicitConfig = Config(type);
+        return new(classCount: explicitConfig.ClassCount,
+            anchors: type == ModelType.YoloV5Detection ? explicitConfig.Anchors : null,
+            heads: type == ModelType.YoloV8Detection ? explicitConfig.Heads : null,
+            regMax: explicitConfig.RegMax);
+    }
+
+    [Theory]
+    [InlineData(ModelType.YoloV5Detection)]
+    [InlineData(ModelType.YoloV8Detection)]
+    public void AutoDimensionsBindToModelMetadataAndKeepTheOriginalConfigUnbound(ModelType type)
+    {
+        var config = AutoConfig(type);
+        var session = new Session(type, 96, 64);
+        using var pipeline = Create(type, session, config);
+        Assert.Equal(96, pipeline.InputWidth);
+        Assert.Equal(64, pipeline.InputHeight);
+        Assert.Equal(1, pipeline.BatchSize);
+        Assert.Equal(96, pipeline.Config!.InputWidth);
+        Assert.Equal(64, pipeline.Config.InputHeight);
+        Assert.Equal(1, pipeline.Config.BatchSize);
+        Assert.Same(session.Inputs[0], pipeline.InputTensor);
+        Assert.Same(pipeline.InputTensor, pipeline.Config.InputTensor);
+        Assert.Equal(1, pipeline.InputTensor.Layout);
+        Assert.Equal(2, pipeline.InputTensor.DataType);
+        Assert.Equal(2, pipeline.InputTensor.Quantization);
+        Assert.Equal(-128, pipeline.InputTensor.ZeroPoint);
+        Assert.Equal(1f / 255, pipeline.InputTensor.Scale);
+        Assert.Equal("images", pipeline.InputTensor.Name);
+        Assert.Equal(0, config.InputWidth);
+        Assert.Equal(0, config.InputHeight);
+        Assert.Equal(0, config.BatchSize);
+        Assert.Null(config.InputTensor);
+        Assert.Equal(ChannelOrder.Rgb, pipeline.Config.ChannelOrder);
+        Assert.Equal(ResizeMode.Letterbox, pipeline.Config.ResizeMode);
+        Assert.Equal(NormalizationMode.ModelDefault, pipeline.Config.Normalization);
+        Assert.Single(pipeline.Predict(Frame).Detections);
+    }
+
+    [Theory]
+    [InlineData(ModelType.YoloV5Detection)]
+    [InlineData(ModelType.YoloV8Detection)]
+    public void ExplicitDimensionsMustMatchTheModelAndReportBothValues(ModelType type)
+    {
+        var session = new Session(type, 64, 32);
+        var error = Assert.Throws<ArgumentException>(() => Create(type, session, Config(type)));
+        Assert.Contains("配置值)=32x32", error.Message);
+        Assert.Contains("模型读出值)=64x32", error.Message);
+        Assert.Equal(1, session.DisposeCalls);
+        Assert.Equal(0, session.DetectCalls);
+
+        using var matching = Create(type, new Session(type));
+        Assert.Equal(32, matching.Config!.InputWidth);
+        Assert.Equal(32, matching.Config.InputHeight);
+        Assert.Equal(1, matching.Config.BatchSize);
+    }
+
+    [Fact]
+    public void OneUnboundConfigurationCanBeUsedForDifferentModelSizes()
+    {
+        var config = AutoConfig(ModelType.YoloV5Detection);
+        using var first = Create(ModelType.YoloV5Detection, new Session(ModelType.YoloV5Detection), config);
+        using var second = Create(ModelType.YoloV5Detection, new Session(ModelType.YoloV5Detection, 64, 96), config);
+        Assert.Equal(32, first.Config!.InputWidth);
+        Assert.Equal(64, second.Config!.InputWidth);
+        Assert.Equal(96, second.Config.InputHeight);
+        Assert.Equal(0, config.InputWidth);
+        Assert.NotSame(first.Config.V5Profile, second.Config.V5Profile);
+    }
+
+    [Theory]
+    [InlineData(ChannelOrder.Bgr, ResizeMode.Letterbox, NormalizationMode.ModelDefault)]
+    [InlineData(ChannelOrder.Rgb, ResizeMode.Stretch, NormalizationMode.ModelDefault)]
+    [InlineData(ChannelOrder.Rgb, ResizeMode.Letterbox, NormalizationMode.None)]
+    [InlineData(ChannelOrder.Rgb, ResizeMode.Letterbox, NormalizationMode.DivideBy255)]
+    public void UnsupportedPreprocessingFailsBeforeCreatingANativeSession(ChannelOrder order, ResizeMode resize, NormalizationMode normalization)
+    {
+        var config = new RknnPipelineConfig(1, anchors: Config(ModelType.YoloV5Detection).Anchors)
+        { ChannelOrder = order, ResizeMode = resize, Normalization = normalization };
+        int creates = 0;
+        var error = Assert.Throws<NotSupportedException>(() => new RknnPipeline(ModelType.YoloV5Detection, "x", config,
+            null, null, (_, _) => { creates++; return new Session(ModelType.YoloV5Detection); }));
+        Assert.Contains($"ChannelOrder={order}", error.Message);
+        Assert.Contains($"ResizeMode={resize}", error.Message);
+        Assert.Contains($"Normalization={normalization}", error.Message);
+        Assert.Equal(0, creates);
+    }
+
+    [Theory]
+    [InlineData(2, 32, 32, 3, 1, 2, 2, -128, false)]
+    [InlineData(0, 32, 32, 3, 1, 2, 2, -128, false)]
+    [InlineData(1, 0, 32, 3, 1, 2, 2, -128, false)]
+    [InlineData(1, 32, 32, 1, 1, 2, 2, -128, false)]
+    [InlineData(1, 32, 32, 3, 0, 2, 2, -128, false)]
+    [InlineData(1, 32, 32, 3, 1, 1, 2, -128, false)]
+    [InlineData(1, 32, 32, 3, 1, 2, 0, -128, false)]
+    [InlineData(1, 32, 32, 3, 1, 2, 2, 0, false)]
+    [InlineData(1, 32, 32, 3, 1, 2, 2, -128, true)]
+    public void ModelDefaultStillRejectsUnsupportedNativeAttributes(int batch, int height, int width, int channels,
+        int layout, int type, int quantization, int zeroPoint, bool approximateScale)
+    {
+        var input = new TensorInfo(0, "actual", [(uint)batch, (uint)height, (uint)width, (uint)channels],
+            (uint)(batch * height * width * channels), layout, type, quantization, zeroPoint,
+            approximateScale ? MathF.BitIncrement(1f / 255) : 1f / 255);
+        var session = new Session(ModelType.YoloV5Detection) { Inputs = [input] };
+        var error = Assert.Throws<ArgumentException>(() => Create(ModelType.YoloV5Detection, session, AutoConfig(ModelType.YoloV5Detection)));
+        Assert.Contains(NativeInputContract.Describe(input), error.Message);
+        Assert.Equal(1, session.DisposeCalls);
+        Assert.Equal(0, session.DetectCalls);
+    }
+
+    [Fact]
+    public void RawTensorAlsoPublishesTheModelInputProperties()
+    {
+        var session = new Session(ModelType.RawTensor, 96, 64);
+        using var pipeline = Create(ModelType.RawTensor, session);
+        Assert.Equal(96, pipeline.InputWidth);
+        Assert.Equal(64, pipeline.InputHeight);
+        Assert.Equal(1, pipeline.BatchSize);
+        Assert.Same(session.Inputs[0], pipeline.InputTensor);
+        Assert.Null(pipeline.Config);
+    }
+
+    [Fact]
+    public void UnknownPreprocessingEnumValuesAreRejectedBeforeSessionCreation()
+    {
+        var anchors = Config(ModelType.YoloV5Detection).Anchors;
+        RknnPipelineConfig[] configs =
+        [
+            new(1, anchors: anchors) { ChannelOrder = (ChannelOrder)99 },
+            new(1, anchors: anchors) { ResizeMode = (ResizeMode)99 },
+            new(1, anchors: anchors) { Normalization = (NormalizationMode)99 }
+        ];
+        int creates = 0;
+        foreach (var config in configs)
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() => new RknnPipeline(ModelType.YoloV5Detection, "x", config,
+                null, null, (_, _) => { creates++; return new Session(ModelType.YoloV5Detection); }));
+        }
+        Assert.Equal(0, creates);
+    }
+
+    [Fact]
+    public void BindingAnInvalidAutomaticDetectionContractDisposesTheSession()
+    {
+        var config = new RknnPipelineConfig(classCount: 1,
+            heads: [new(0, 1, null, 8), new(2, 3, null, 16), new(4, 6, null, 32)]);
+        var session = new Session(ModelType.YoloV8Detection);
+        Assert.Throws<ArgumentException>(() => Create(ModelType.YoloV8Detection, session, config));
+        Assert.Equal(1, session.DisposeCalls);
+        Assert.Equal(0, session.DetectCalls);
     }
 
     [Fact]
@@ -251,8 +407,9 @@ public sealed class RknnPipelineTests
         public Action? BeforeRun { get; set; }
         public InferenceResult Result { get; }
 
-        public Session(ModelType type)
+        public Session(ModelType type, int width = 32, int height = 32)
         {
+            Inputs = [new(0, "images", [1, (uint)height, (uint)width, 3], (uint)(width * height * 3), 1, 2, 2, -128, 1f / 255)];
             var outputs = new List<TensorOutput>();
             if (type == ModelType.RawTensor)
             { outputs.Add(new(new(0, "embedding", [1, 2], 2, 0, 0, 0, 0, 1), new float[] { 2, 7 })); }
@@ -260,7 +417,7 @@ public sealed class RknnPipelineTests
             {
                 for (int stride = 8; stride <= 32; stride *= 2)
                 {
-                    int plane = 32 / stride * (32 / stride);
+                    int plane = width / stride * (height / stride);
                     if (type == ModelType.YoloV5Detection)
                     {
                         var values = Enumerable.Repeat(-20f, 18 * plane).ToArray();
@@ -274,7 +431,7 @@ public sealed class RknnPipelineTests
                         if (stride == 8) { scores[0] = .9f; }
                         Add(1, scores);
                     }
-                    void Add(int channels, float[] values) => outputs.Add(new(new((uint)outputs.Count, "head", [1, (uint)channels, (uint)(32 / stride), (uint)(32 / stride)], (uint)values.Length, 0, 2, 2, 0, .1f), values));
+                    void Add(int channels, float[] values) => outputs.Add(new(new((uint)outputs.Count, "head", [1, (uint)channels, (uint)(height / stride), (uint)(width / stride)], (uint)values.Length, 0, 2, 2, 0, .1f), values));
                 }
             }
             Outputs = outputs.Select(output => output.Info).ToArray();

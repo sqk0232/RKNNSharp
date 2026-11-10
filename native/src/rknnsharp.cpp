@@ -11,9 +11,12 @@
 #include <cmath>
 #include <climits>
 #include <cstring>
+#include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <cerrno>
@@ -40,6 +43,20 @@ double ms(Clock::time_point a,Clock::time_point b){return std::chrono::duration<
 void check(int status,const char* operation){if(status<0)throw std::runtime_error(std::string(operation)+": "+std::to_string(status));}
 void rga(IM_STATUS s,const char* op){if(s!=IM_STATUS_SUCCESS&&s!=IM_STATUS_NOERROR)throw std::runtime_error(std::string(op)+": "+imStrError(s));}
 void require(bool v,const char* why){if(!v)throw std::runtime_error(why);}
+void require_input(bool valid,const char* why,const rknn_tensor_attr& input){
+    if(valid)return;
+    std::ostringstream actual;
+    actual<<why<<"; actual model input index="<<input.index<<", dimensions=[";
+    for(uint32_t i=0;i<input.n_dims&&i<sizeof(input.dims)/sizeof(input.dims[0]);++i){
+        if(i)actual<<',';
+        actual<<input.dims[i];
+    }
+    actual<<"], rank="<<input.n_dims<<", layout="<<input.fmt<<", dataType="<<input.type
+          <<", quantization="<<input.qnt_type<<", zeroPoint="<<input.zp
+          <<", scale="<<std::setprecision(std::numeric_limits<float>::max_digits10)<<input.scale
+          <<", elements="<<input.n_elems<<", widthStride="<<input.w_stride<<", sizeWithStride="<<input.size_with_stride;
+    throw std::runtime_error(actual.str());
+}
 template<class F> int guard(F f){try{f();return 0;}catch(const std::exception& e){error=e.what();return -1;}catch(...){error="unknown native exception";return -1;}}
 }
 namespace rks_detail {
@@ -161,38 +178,34 @@ struct rks_session {
     uint32_t w=0,h=0,stride=0;
     std::vector<std::vector<float>> values;
     std::vector<std::vector<int8_t>> quantized_values;
+    std::vector<rknn_tensor_mem*> dynamic_outputs;
     std::string versions;
     bool has_output=false;
     uint32_t output_encoding=0; // 0 invalid, 1 float snapshot, 2 borrowed INT8
     uint64_t generation=0;
     bool supports_int8=false;
+    bool dynamic=false,input_ready=false;
     bool preprocessing_jobs=true;
     bool letterbox_fill_jobs=true;
     bool prefer_fast_float=false;
     dev_t input_device=0;ino_t input_inode=0;
-    ~rks_session(){source_imports.clear();rgb_rga.reset();signed_rga.reset();if(context){if(signed_input)rknn_destroy_mem(context,signed_input);rknn_destroy(context);}}
+    ~rks_session(){source_imports.clear();rgb_rga.reset();signed_rga.reset();if(context){for(auto* output:dynamic_outputs)rknn_destroy_mem(context,output);if(signed_input)rknn_destroy_mem(context,signed_input);rknn_destroy(context);}}
 };
-struct FloatOutputs {float* const* values;const uint32_t* counts;uint32_t count;};
-extern "C" {
-const char* rks_last_error(){return error.c_str();}
-uint32_t rks_abi_version(){return 2;}
-uint32_t rks_capabilities(){return 1;}
-int rks_create(const char* path,rks_session** result){return guard([&]{
-    require(result,"session output is null");*result=nullptr;require(path&&*path,"model path is empty");
-    auto s=std::make_unique<rks_session>();
-    rga(imcheckHeader(),"RGA header/runtime compatibility");
-    check(rknn_init(&s->context,const_cast<char*>(path),0,0,nullptr),"rknn_init");
-    rknn_input_output_num n{};check(rknn_query(s->context,RKNN_QUERY_IN_OUT_NUM,&n,sizeof(n)),"query tensor count");
-    require(n.n_input==1&&n.n_output>0&&n.n_output<=64,"only single-input models with 1..64 outputs are supported");
-    check(rknn_query(s->context,RKNN_QUERY_NATIVE_INPUT_ATTR,&s->input,sizeof(s->input)),"query native input");
+static void reset_input(rks_session* s){
+    s->input_ready=false;s->source_imports.clear();
+    s->rgb_rga.reset();s->signed_rga.reset();
+    if(s->signed_input){rknn_destroy_mem(s->context,s->signed_input);s->signed_input=nullptr;}
+    s->rgb_owner.reset();s->signed_owner.reset();
+}
+static void prepare_input(rks_session* s){
     const auto& a=s->input;
-    require(a.n_dims==4&&a.dims[0]==1&&a.fmt==RKNN_TENSOR_NHWC&&a.dims[3]==3,"only static batch1 NHWC RGB native input is supported");
-    require(a.type==RKNN_TENSOR_INT8&&a.qnt_type==RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC&&a.zp==-128&&a.scale==1.f/255.f,"only INT8 zp=-128 exact float scale=1/255 input is supported; hardware normalization profile required");
+    require_input(a.n_dims==4&&a.dims[0]==1&&a.fmt==RKNN_TENSOR_NHWC&&a.dims[3]==3,"execution requires concrete batch1 NHWC RGB native input",a);
+    require_input(a.type==RKNN_TENSOR_INT8&&a.qnt_type==RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC&&a.zp==-128&&a.scale==1.f/255.f,"only INT8 zp=-128 exact float scale=1/255 input is supported; hardware normalization profile required",a);
     s->w=a.dims[2];s->h=a.dims[1];s->stride=a.w_stride?a.w_stride:s->w;
-    require(s->w>=2&&s->h>=2&&s->w<=4096&&s->h<=4096&&s->stride>=s->w&&s->stride<=8192,"unsupported input dimensions/stride");
+    require_input(s->w>=2&&s->h>=2&&s->w<=4096&&s->h<=4096&&s->stride>=s->w&&s->stride<=8192,"unsupported input dimensions/stride",a);
     uint64_t bytes=uint64_t(s->stride)*s->h*3;
-    require(bytes<=UINT32_MAX&&a.size_with_stride>=bytes,"native input allocation/stride mismatch");
-    require(s->stride%16==0&&a.size_with_stride==bytes,"native RGB input must have 16-pixel aligned stride and no hidden padding");
+    require_input(bytes<=UINT32_MAX&&a.size_with_stride>=bytes,"native input allocation/stride mismatch",a);
+    require_input(s->stride%16==0&&a.size_with_stride==bytes,"native RGB input must have 16-pixel aligned stride and no hidden padding",a);
     rks_image* owner=nullptr;rks_frame allocated{};
     auto allocate_dma=[&](const char* what){
         owner=nullptr;
@@ -217,19 +230,113 @@ int rks_create(const char* path,rks_session** result){return guard([&]{
     s->signed_rga=std::make_unique<Imported>(s->signed_input->fd,s->signed_input->size,s->w,s->h,s->stride,s->h,RK_FORMAT_RGB_888);
     auto bind=s->input;bind.pass_through=1;
     check(rknn_set_io_mem(s->context,s->signed_input,&bind),"rknn_set_io_mem(native pass-through)");
-    s->attrs.resize(n.n_output);s->values.resize(n.n_output);s->quantized_values.resize(n.n_output);s->supports_int8=true;
-    for(unsigned i=0;i<n.n_output;i++){
+    s->input_ready=true;
+}
+static void read_outputs(rks_session* s,uint32_t output_count,bool current){
+    s->attrs.resize(output_count);s->values.resize(output_count);s->quantized_values.resize(output_count);s->supports_int8=true;
+    for(unsigned i=0;i<output_count;i++){
         auto& o=s->attrs[i];o.index=i;
-        check(rknn_query(s->context,RKNN_QUERY_OUTPUT_ATTR,&o,sizeof(o)),"query output");
-        require(o.n_elems>0&&o.n_dims<=16,"invalid output tensor");s->values[i].resize(o.n_elems);
+        check(rknn_query(s->context,current?RKNN_QUERY_CURRENT_OUTPUT_ATTR:RKNN_QUERY_OUTPUT_ATTR,&o,sizeof(o)),"query output");
+        require(o.n_dims>0&&o.n_dims<=16&&((s->dynamic&&!current)||o.n_elems>0),"invalid output tensor");if(!s->dynamic||current)s->values[i].resize(o.n_elems);
         bool supported=o.fmt==RKNN_TENSOR_NCHW&&o.type==RKNN_TENSOR_INT8&&o.qnt_type==RKNN_TENSOR_QNT_AFFINE_ASYMMETRIC&&o.size==o.n_elems&&o.scale>0&&std::isfinite(o.scale);
-        if(supported)s->quantized_values[i].resize(o.n_elems);else s->supports_int8=false;
+        if(supported&&(!s->dynamic||current))s->quantized_values[i].resize(o.n_elems);else s->supports_int8=false;
     }
+}
+static void prepare_dynamic_outputs(rks_session* s){
+    // Dynamic zero-copy input also requires explicit output bindings on 2.3.2.
+    // Preserve each queried dtype/layout; outputs_get/release still owns conversion.
+    const size_t previous=s->dynamic_outputs.size();
+    s->dynamic_outputs.reserve(previous+s->attrs.size());
+    for(auto attr:s->attrs){
+        uint32_t bytes=std::max(attr.size,attr.size_with_stride);
+        require(bytes>0,"dynamic output allocation is empty");
+        auto* memory=rknn_create_mem(s->context,bytes);
+        require(memory,"dynamic output allocation failed");
+        // Retain partially registered buffers on failure until a complete rebind
+        // or context disposal. Never free a buffer still referenced by RKNN.
+        s->dynamic_outputs.push_back(memory);
+        check(rknn_set_io_mem(s->context,memory,&attr),"rknn_set_io_mem(dynamic output)");
+    }
+    for(size_t i=0;i<previous;i++)rknn_destroy_mem(s->context,s->dynamic_outputs[i]);
+    s->dynamic_outputs.erase(s->dynamic_outputs.begin(),s->dynamic_outputs.begin()+previous);
+}
+static void initialize_session(rks_session* s){
+    rknn_input_output_num n{};check(rknn_query(s->context,RKNN_QUERY_IN_OUT_NUM,&n,sizeof(n)),"query tensor count");
+    require(n.n_input==1&&n.n_output>0&&n.n_output<=64,"only single-input models with 1..64 outputs are supported");
+    rknn_input_range range{};
+    s->dynamic=rknn_query(s->context,RKNN_QUERY_INPUT_DYNAMIC_RANGE,&range,sizeof(range))==0&&range.shape_number>0;
+    int input_status=rknn_query(s->context,RKNN_QUERY_NATIVE_INPUT_ATTR,&s->input,sizeof(s->input));
+    if(input_status<0&&s->dynamic){
+        s->input={};
+        input_status=rknn_query(s->context,RKNN_QUERY_INPUT_ATTR,&s->input,sizeof(s->input));
+    }
+    check(input_status,"query model input");
+    require_input(s->input.n_dims>0&&s->input.n_dims<=16,"invalid input rank",s->input);
+    // Dynamic models load and duplicate without allocating shape-dependent DMA.
+    // Every requested shape is validated and prepared on its existing context.
+    if(!s->dynamic)prepare_input(s);
+    read_outputs(s,n.n_output,false);
     rknn_sdk_version v{};check(rknn_query(s->context,RKNN_QUERY_SDK_VERSION,&v,sizeof(v)),"query runtime version");
     s->versions=std::string("RKNN API=")+v.api_version+"; driver="+v.drv_version+"; "+RGA_API_FULL_VERSION;
+}
+struct FloatOutputs {float* const* values;const uint32_t* counts;uint32_t count;};
+extern "C" {
+const char* rks_last_error(){return error.c_str();}
+uint32_t rks_abi_version(){return 2;}
+uint32_t rks_capabilities(){return 1;}
+int rks_create(const char* path,rks_session** result){return guard([&]{
+    require(result,"session output is null");*result=nullptr;require(path&&*path,"model path is empty");
+    auto s=std::make_unique<rks_session>();
+    rga(imcheckHeader(),"RGA header/runtime compatibility");
+    check(rknn_init(&s->context,const_cast<char*>(path),0,0,nullptr),"rknn_init");
+    initialize_session(s.get());
     *result=s.release();
 });}
 void rks_destroy(rks_session* s){delete s;}
+uint32_t rks_is_dynamic(rks_session* s){return s&&s->dynamic?1u:0u;}
+int rks_dup_context(rks_session* source,rks_session** result){return guard([&]{
+    require(result,"session output is null");*result=nullptr;require(source,"source session is null");
+    std::lock_guard<std::mutex> lock(source->gate);
+    auto duplicate=std::make_unique<rks_session>();
+    check(rknn_dup_context(&source->context,&duplicate->context),"rknn_dup_context");
+    initialize_session(duplicate.get());
+    duplicate->prefer_fast_float=source->prefer_fast_float;
+    *result=duplicate.release();
+});}
+int rks_set_input_shapes(rks_session* s,uint32_t count,const rks_tensor* shapes){return guard([&]{
+    require(s,"null session");std::lock_guard<std::mutex> lock(s->gate);
+    require_input(count==1&&shapes,"shape change requires exactly one input",s->input);
+    require_input(s->dynamic,"shape change requires a dynamic model",s->input);
+    require_input(shapes[0].index==0&&shapes[0].n_dims==s->input.n_dims,"input shape index/rank mismatch",s->input);
+    rknn_tensor_attr requested{};
+    check(rknn_query(s->context,RKNN_QUERY_INPUT_ATTR,&requested,sizeof(requested)),"query shape input");
+    // Public dimensions follow the native NHWC layout. Translate only from
+    // queried layouts, never from tensor names or model filenames.
+    require_input((s->input.fmt==RKNN_TENSOR_NHWC||s->input.fmt==RKNN_TENSOR_NCHW)&&requested.n_dims==4&&shapes[0].n_dims==4,
+                  "shape setting requires native NHWC rank4 input",s->input);
+    requested.n_dims=shapes[0].n_dims;
+    if(s->input_ready&&s->input.fmt==RKNN_TENSOR_NHWC&&
+       std::equal(shapes[0].dims,shapes[0].dims+4,s->input.dims))return;
+    for(uint32_t i=0;i<requested.n_dims;i++){
+        require_input(shapes[0].dims[i]>0&&shapes[0].dims[i]<=INT_MAX,"invalid requested dimension",s->input);
+        requested.dims[i]=shapes[0].dims[i];
+    }
+    if(requested.fmt==RKNN_TENSOR_NCHW){
+        requested.dims[1]=shapes[0].dims[3];requested.dims[2]=shapes[0].dims[1];requested.dims[3]=shapes[0].dims[2];
+    }else require_input(requested.fmt==RKNN_TENSOR_NHWC,"unsupported logical input layout",s->input);
+    s->has_output=false;s->output_encoding=0;s->generation++;
+    reset_input(s);
+    int status=rknn_set_input_shapes(s->context,count,&requested);
+    // Refresh even after vendor failure so diagnostics describe actual state.
+    rknn_tensor_attr current{};
+    int queried=rknn_query(s->context,RKNN_QUERY_CURRENT_NATIVE_INPUT_ATTR,&current,sizeof(current));
+    require_input(queried==0,"query current native input failed after shape setting",s->input);
+    s->input=current;
+    require_input(status==0,"rknn_set_input_shapes failed",s->input);
+    read_outputs(s,static_cast<uint32_t>(s->attrs.size()),true);
+    prepare_dynamic_outputs(s);
+    prepare_input(s);
+});}
 int rks_get_tensor_count(rks_session* s,uint32_t* i,uint32_t* o){return guard([&]{require(s&&i&&o,"null tensor count argument");std::lock_guard<std::mutex> lock(s->gate);*i=1;*o=s->attrs.size();});}
 int rks_get_tensor(rks_session* s,uint32_t output,uint32_t index,rks_tensor* t){return guard([&]{require(s&&t,"null tensor argument");std::lock_guard<std::mutex> lock(s->gate);require(output<=1&&index<(output?s->attrs.size():1),"tensor index out of range");tensor(output?s->attrs[index]:s->input,*t);});}
 int rks_get_versions(rks_session* s,char* p,uint32_t n){return guard([&]{require(s&&p,"null version argument");std::lock_guard<std::mutex> lock(s->gate);require(n>s->versions.size(),"version buffer is too small");std::memcpy(p,s->versions.c_str(),s->versions.size()+1);});}
@@ -242,6 +349,7 @@ static int run_encoded(rks_session* s,const rks_frame* f,rks_run_info* info,bool
     require(s,"null session");std::lock_guard<std::mutex> lock(s->gate);s->has_output=false;s->output_encoding=0;s->generation++;
     try {
     require(f&&info,"null run argument");*info={};
+    require_input(s->input_ready,"input shape is not prepared; call rks_set_input_shapes with a supported shape",s->input);
     require(!quantized||s->supports_int8,"raw path requires contiguous standard NCHW affine INT8 outputs");
     if(direct){
         require(!quantized&&direct->values&&direct->counts&&direct->count==s->attrs.size(),"float output buffer count mismatch");

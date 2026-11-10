@@ -39,6 +39,7 @@ struct Fixture {
         verify(fd >= 0 && ftruncate(fd, 4096) == 0, "fixture allocation failed");
         frame = {fd, 16, 16, RKS_RGB888, 48, 16, 768, 0, 0, 0};
         session.w = session.h = session.stride = 16;
+        session.input_ready = true;
         session.signed_input = &input;
         session.rgb_rga = std::make_unique<Imported>(fd, 768, 16, 16, 16, 16, RK_FORMAT_RGB_888);
         session.signed_rga = std::make_unique<Imported>(fd, 768, 16, 16, 16, 16, RK_FORMAT_RGB_888);

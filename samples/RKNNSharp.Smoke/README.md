@@ -13,7 +13,7 @@ Linux ARM64 RK3588 的采集与推理示例。主机上可运行 `--help`，实�
 
 变量由调用者设置为板端文件路径和真实色域；不要把完整 RTSP URL 放到命令行。私有文件仅由进程读取，内容为单行完整 URL。单帧入口位于 [SingleFrameSample.cs](SingleFrameSample.cs)，使用实际公开 API：创建 `RknnPipeline(ModelType, path, config)` 并校验 metadata → 采集 → 借用 `DmaFrame` → 推理 → 输出独立检测结果 → `finally` 释放 sample → 释放 capture/pipeline。
 
-默认 `v5` 采用 `ExampleConfigurations.V5()` 的显式官方 640 anchors，选择 `ModelType.YoloV5Detection`。末位参数 `dfl` 选择 `ModelType.YoloV8Detection`；两者都调用 `pipeline.Predict(frame)` 的 INT8 路径，契约固定为文档中的 640×640、80 类、regMax 16、stride 8/16/32、box/class/score-sum 九输出示例，不按模型文件名识别。DFL 使用显式 affine 反量化，SDK 浮点参考仍可通过 `PredictRawInto` 与 `pipeline.Decode` 获取，两者舍入可能不同。只有输入输出属性符合还不足以证明 anchors、类别或 head 索引正确；须确认自己的模型契约。单帧不绘框或显示，不保存像素。输出一行 JSON，包含 decoder、PTS、尺寸、检测和阶段耗时。按输入节拍读取第一个可用帧，不是低延迟相机应用模板。
+默认 `v5` 采用 `ExampleConfigurations.V5()` 的显式官方 640 anchors，选择 `ModelType.YoloV5Detection`。末位参数 `dfl` 选择 `ModelType.YoloV8Detection`。两者都调用 `pipeline.Predict(frame)` 的 INT8 路径，宽高从模型读取。DFL 示例假设 80 类、regMax 16、stride 8/16/32、box/class/score-sum 九输出，不按模型文件名识别。DFL 使用显式 affine 反量化，SDK 浮点参考仍可通过 `PredictRawInto` 与 `pipeline.Decode` 获取，两者舍入可能不同。须确认自己的 anchors、类别及 head 索引。单帧不绘框或显示，不保存像素。输出一行 JSON，包含 decoder、PTS、尺寸、检测和阶段耗时。按输入节拍读取第一个可用帧。
 
 `--single-frame` 接受 4 至 7 个参数（不含程序名）：`MODEL --single-frame SOURCE_MODE SOURCE_FILE [codec=h264] [colorspace=auto] [decoder=v5|dfl]`。`SOURCE_MODE` 只允许 `--file` 或 `--rtsp-file`；codec 为 h264/h265；colorspace 为 auto/601limit/601full/709limit。要写 `dfl` 或显式 `v5`，必须先给出 codec 和 colorspace。auto 仅接受 caps 明确声明的支持组合，不按分辨率猜测色域。
 

@@ -13,6 +13,9 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Library)] internal static partial nint rks_last_error();
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int rks_create(string modelPath, out nint session);
+    [LibraryImport(Library)] internal static partial int rks_dup_context(SessionHandle source, out nint session);
+    [LibraryImport(Library)] internal static partial uint rks_is_dynamic(SessionHandle session);
+    [LibraryImport(Library)] internal static partial int rks_set_input_shapes(SessionHandle session, uint inputCount, NativeTensor* inputs);
     [LibraryImport(Library)] internal static partial void rks_destroy(nint session);
     [LibraryImport(Library)] internal static partial int rks_get_tensor_count(SessionHandle session, out uint inputs, out uint outputs);
     [LibraryImport(Library)] internal static partial int rks_get_tensor(SessionHandle session, uint isOutput, uint index, out NativeTensor tensor);

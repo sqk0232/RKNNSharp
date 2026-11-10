@@ -19,7 +19,7 @@ dotnet publish -c Release -r linux-arm64 --self-contained false
 
 ## 最小调用
 
-下面代码可直接作为应用中的一个 C# 文件编译。采集层取得符合契约的 `DmaFrame` 后调用 `FrameDetection.DetectFrame(modelPath, frame)`；本示例假定模型为 640×640、80 类、三尺度 YOLOv5 raw-logit 输出，并使用所列 anchors，必须与实际模型匹配。
+下面代码可直接作为应用中的一个 C# 文件编译。采集层取得符合契约的 `DmaFrame` 后调用 `FrameDetection.DetectFrame(modelPath, frame)`。宽高自动从模型读取，示例的 80 类、三尺度 YOLOv5 raw-logit 输出和所列 anchors 须与实际模型匹配。
 
 ```csharp
 using System;
@@ -29,7 +29,7 @@ public static class FrameDetection
 {
     public static DetectionResult DetectFrame(string modelPath, DmaFrame frame)
     {
-        var config = new RknnPipelineConfig(640, 640, 80, anchors:
+        var config = new RknnPipelineConfig(classCount: 80, anchors:
         [
             [new(10, 13), new(16, 30), new(33, 23)],
             [new(30, 61), new(62, 45), new(59, 119)],
@@ -45,9 +45,38 @@ public static class FrameDetection
 }
 ```
 
-这是单次调用的生命周期示例；连续推理时在循环外创建一个 `RknnPipeline`，全部调用结束后再释放。检测结果包含类别、置信度、源图坐标框、letterbox 变换与阶段耗时。调用为同步操作，中途不可取消，同一实例的预测和释放互斥。
+这是单次调用的生命周期示例；连续推理时在循环外创建一个 `RknnPipeline`，全部调用结束后再释放。检测结果包含类别、置信度、源图坐标框、letterbox 变换与阶段耗时。调用为同步操作，中途不可取消，同一实例的预测并发借用构造时建立的固定池，默认 1 个，可通过 RknnModelOptions.SessionPoolSize 调整，释放等待在途调用。
+
+加载后通过 `pipeline.InputWidth`、`InputHeight`、`BatchSize` 和 `InputTensor` 查看模型属性，`pipeline.Config` 为绑定模型的独立配置。通道顺序 `ChannelOrder.Rgb`、缩放 `ResizeMode.Letterbox` 和归一化 `NormalizationMode.ModelDefault` 均有默认值。ModelDefault 沿用精确 affine INT8 量化契约，不额外施加均值/方差。BGR、Stretch、None、DivideBy255 当前会明确拒绝。原有显式宽高构造保留，尺寸不匹配时异常同时列出配置值和模型值。
 
 `DmaFrame` 借用采集层 FD，不拥有它。生产者必须完成写入，调用方须持有 sample/FD 至同步返回，随后才可复用或释放。输入仅支持线性、单 FD、offset=0 的 NV12/RGB888/RGBA8888；NV12 必须显式声明支持的矩阵和范围。原生模型输入要求静态 batch=1、NHWC RGB affine INT8、zero point=-128、scale 精确为 `float(1/255)`。不提供 CPU 图像处理或软件解码回退。
+
+## 会话池（SessionPoolSize）
+
+`RknnModelOptions.SessionPoolSize` 默认 **1**。构造时一次建好 N 个原生会话，推理只借还已有会话，不按帧或形状重建上下文，用于提高并发吞吐、避免反复创建的内存与时延开销。低帧率、单线程顺序调用使用 1 节省内存；单路高帧率、多路相机或一帧多个模型/多个调用并发时，可手动设为 **3**，不要求有多路图像源。RK3588 有 3 个 NPU 核，3 是常用调优上限，并非 API 限制。每个模型有自己的池；多个模型分别配置，池大小不会让顺序代码自动并行。所有会话沿用同一 `CoreMask`，不自动分核。
+
+检测仍用 `RknnPipelineConfig` 配置 anchors/heads，池大小则通过 `RknnModelOptions` 传入构造参数。沿用上面最小调用的 `config`、`modelPath`：
+
+```csharp
+var options = new RknnModelOptions { SessionPoolSize = 3 };
+using var pipeline = new RknnPipeline(
+    ModelType.YoloV5Detection, modelPath, config, options);
+```
+
+原始张量也可用 `new RknnModel(modelPath, options)`。允许正 `int`（1 至 `int.MaxValue`），小于 1 时在创建原生会话前抛出 `ArgumentOutOfRangeException`；没有额外的软件上限，但较大值仍受设备资源限制，创建失败会清理已建会话。
+
+首个会话加载模型，其余经 `rks_dup_context` 调用 `rknn_dup_context` 复制上下文，共享权重；每个会话的输入输出缓冲互相隔离、可并发。调用方须保持输入 DMA 就绪且存活，并为并发调用提供独占输出缓冲。池用尽时调用方阻塞等待会话归还，没有超时或取消参数。
+
+`Dispose` 开始后拒绝新调用，唤醒并拒绝排队调用，借用时抛出 `ObjectDisposedException`；等在途推理全部归还后逆序销毁全部会话，复制会话先于主会话，每个只销毁一次，可重复释放。旧 `librknnsharp_native.so` 若缺少 `rks_dup_context` 导出，构造时逐个独立创建其余会话，不共享权重、内存更高，通过 `options.LoggerFactory` 在启用 Warning 日志时记录一次警告（默认空日志不输出）；推理期仍不重建。真实复制错误会使构造失败并清理已建会话。
+
+静态板测条件：RK3588、RKNN Runtime 2.3.2、驱动 0.9.8，YOLOv5s / YOLOv8n INT8，复用单张 512×384 RGB888 图片（模型输入 640×640）。干净性能测试未挂载诊断 `LD_PRELOAD`，每组预热 100 + 正式 300 帧 × 3 轮，合并 900 个正式样本；FPS 为总帧数/总用时，均值为单次调用耗时，含预处理、推理、检测后处理，不含采集/解码等待及模型构造。
+
+| 模型 | 池 1 / 单线程 FPS | 单帧均值 ms | 池 3 / 三线程 FPS | 单帧均值 ms |
+| --- | ---: | ---: | ---: | ---: |
+| YOLOv5s INT8 | 50.82 | 19.67 | 138.72 | 21.57 |
+| YOLOv8n INT8 | 52.34 | 19.10 | 148.00 | 20.18 |
+
+并行吞吐提高不等于单请求延迟降低，不能取总 FPS 的倒数作为延迟；轮间有波动，其他模型/设备需重测。同一设备、Runtime、驱动及静态模型的另组验证中，池 3 共享权重相比逐会话独立创建，按 dma-buf 统计节省 DMA 内存约 16.2 MiB（YOLOv5s）/ 6.5 MiB（YOLOv8n）；池 1/3、单线程/多线程的 1210 次结果比较全部一致；150 次创建/推理/释放循环后上下文与 DMA 内存不累积。有限验证不代表动态维或长期运行均通过。
 
 ## 模型与输出选择
 
@@ -71,7 +100,7 @@ public static class FrameDetection
 | `Run` / `RunInto` | `PredictRaw` / `PredictRawInto`；普通张量模型选择 `RawTensor` |
 | DMA、结果、选项契约；原生 ABI 2 | 保留；Logging.Abstractions 依赖继续存在 |
 
-上述五个旧类型不再公开。`ModelType` 是 0.3.0 新 API，官方 0.2.0 没有此枚举，不能把开发中间命名当成已发布枚举改名。完整映射和功能对比见[迁移指南](https://github.com/sqk0232/RKNNSharp/blob/main/docs/migration-0.3.md)。
+上述表格保留0.3.0迁移历史；新增公开RknnModel(modelPath)及options重载用于原始张量，检测profile保持内部实现，历史映射见[0.3迁移指南](https://github.com/sqk0232/RKNNSharp/blob/main/docs/migration-0.3.md)。
 
 本轮包含 DFL INT8 路径、profile 缓存、NMS 原地排序及源 DMA 导入缓存；[优化前后测量](https://github.com/sqk0232/RKNNSharp/blob/main/README.md#本轮优化前后)只代表所列模型和设备，包含前后处理、不含采集解码，不是官方 0.2.0 对 0.3.0 的版本跑分。不承诺任意模型加速、mAP 或长期稳定性。
 
