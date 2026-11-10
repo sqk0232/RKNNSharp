@@ -11,9 +11,9 @@
 | 项目 | 要求 |
 | --- | --- |
 | 构建主机 | Windows 或 Linux，.NET SDK **10.0.403**（`global.json` 允许同 feature band 的更新补丁） |
-| 托管代码 | `net10.0` / C# 14；核心库无第三方托管包依赖 |
+| 托管代码 | `net10.0` / C# 14；依赖 `Microsoft.Extensions.Logging.Abstractions` 10.0.0，默认空日志 |
 | 运行目标 | Linux ARM64 RK3588、兼容 BSP、NPU/RGA3、DMA32 设备及访问权限 |
-| 已记录的硬件组合 | Runtime 1.5.2 的早期 DMA/媒体链路；Runtime 2.3.2 的 Run/RunInto、YOLOv5 和指定 YOLOv8n；RKNPU 0.9.8 / RGA 1.10.1，详见[硬件约束](https://github.com/sqk0232/RKNNSharp/blob/main/docs/hardware.md) |
+| 已记录的硬件组合 | Runtime 2.3.2 / RKNPU 0.9.8 / RGA 1.10.1 的指定 V5/DFL、DMA 缓存和有限硬件解码；早期记录另含 Runtime 1.5.2，详见[硬件约束](https://github.com/sqk0232/RKNNSharp/blob/main/docs/hardware.md) |
 | 采集样例额外依赖 | GStreamer ≥1.20、BSP 的 `mppvideodec`、原生采集 adapter |
 | 自备输入 | 符合[模型契约](https://github.com/sqk0232/RKNNSharp/blob/main/docs/model-contract.md)的 `.rknn`，以及 DMA 来源或 H.264/H.265 MP4/私有 RTSP URL 文件 |
 
@@ -21,7 +21,9 @@ Windows/x64 可构建、运行托管测试和样例帮助，不能运行硬件�
 
 库没有按 Runtime 版本字符串固定拒绝其他版本，但会校验 ABI、模型和缓冲契约。编译头文件须与目标 Runtime 匹配，模型 Toolkit、Runtime 和 BSP 驱动须兼容；三者版本号无需数字相同。上述记录不代表所有 2.x、其他模型或全部媒体链路均已验证。
 
-## 快速开始
+## 源码开发快速开始
+
+NuGet 使用者请先阅读[消费者快速开始](https://github.com/sqk0232/RKNNSharp/blob/main/NUGET_README.md)，其中提供安装、可编译调用及运行条件。以下步骤供仓库开发与样例验证使用。
 
 在源码根目录执行，首次还原需访问 NuGet 包源：
 
@@ -39,48 +41,72 @@ dotnet run --project samples/RKNNSharp.Smoke -c Release --no-build -- --help
 dotnet add path/to/YourApp.csproj reference src/RKNNSharp/RKNNSharp.csproj
 ```
 
-`path/to/YourApp.csproj` 替换为自己的 `net10.0` 应用项目。核心调用入口：
+`path/to/YourApp.csproj` 替换为自己的 `net10.0` 应用项目。0.3.0 使用下列统一入口（相对官方 0.2.0 为破坏性 API 更新）：
 
 ```csharp
 using RKNNSharp;
 
-using var model = new RknnModel(modelPath);
-// 示例使用官方 YOLOv5 640 anchors，必须先确认与自己的模型一致。
-var profile = YoloV5Profile.CreateOfficial640Example();
-profile.ValidateModel(model.Inputs, model.Outputs);
-// frame 由采集层提供；调用方持有 sample/FD，且生产者已完成写入。
-DetectionResult result = model.Detect(frame, profile);
-foreach (Detection detection in result.Detections)
-    Console.WriteLine($"{detection.ClassId}: {detection.Confidence:F3} {detection.Box}");
-// 同步调用返回后才可释放或复用输入 sample。
+public static class FrameDetection
+{
+    public static DetectionResult DetectFrame(string modelPath, DmaFrame frame)
+    {
+        // 官方 640 anchors 仅为示例假设，须确认与自己的模型一致。
+        var config = new RknnPipelineConfig(640, 640, 80, anchors:
+        [
+            [new(10, 13), new(16, 30), new(33, 23)],
+            [new(30, 61), new(62, 45), new(59, 119)],
+            [new(116, 90), new(156, 198), new(373, 326)]
+        ]);
+        using var pipeline = new RknnPipeline(ModelType.YoloV5Detection, modelPath, config);
+        DetectionResult result = pipeline.Predict(frame);
+        foreach (Detection detection in result.Detections)
+            Console.WriteLine($"{detection.ClassId}: {detection.Confidence:F3} {detection.Box}");
+        return result;
+    }
+}
 ```
 
-`modelPath` 和 `frame` 来自调用方。完整的 DMA 描述符、绘框、`Run`/`RunInto` 缓冲复用和并发契约见 [API 说明](https://github.com/sqk0232/RKNNSharp/blob/main/docs/api.md)。DFL 三尺度输出使用 [YoloDetectionProfile](https://github.com/sqk0232/RKNNSharp/blob/main/docs/yolo-detection.md)，不能仅凭 YOLO 名称推断模型兼容。
+普通非检测模型使用 `new RknnPipeline(ModelType.RawTensor, modelPath)`，通过 `PredictRaw` 或 `PredictRawInto` 获取张量；此分支不提供检测解码。旧模型构造和 profile API 不再公开。
 
-`Run`/`RunInto` 默认保留 SDK float 转换。可通过四参构造显式选择 `FloatOutputMode.PreferFastInt8`，允许合适的标准 INT8 head 使用快速转换，其他 head 仍由 SDK 转换；`Detect` 不受影响。该模式可能有浮点舍入差，不能保证 SDK 逐 bit 一致或任意阈值附近的检测决策相同；使用前应验证自己的模型与阈值。旧 native 继续支持默认模式，缺少可选配置导出时显式快速请求会报不支持。调用示例和精度限制见 [可选模式契约](https://github.com/sqk0232/RKNNSharp/blob/main/docs/api.md#显式可选的快速浮点转换)。
+采集层准备 `modelPath` 和 `frame` 后调用此方法，持有 sample/FD 至同步返回。连续推理应将 pipeline 创建移到循环外，全部调用结束后释放。完整的 DMA 描述符、绘框、`PredictRaw`/`PredictRawInto` 缓冲复用和并发契约见 [API 说明](https://github.com/sqk0232/RKNNSharp/blob/main/docs/api.md)。DFL 三尺度输出使用 [ModelType.YoloV8Detection](https://github.com/sqk0232/RKNNSharp/blob/main/docs/yolo-detection.md)，不能仅凭 YOLO 名称推断模型兼容。
+
+`PredictRaw`/`PredictRawInto` 默认保留 SDK float 转换。可通过统一构造入口的 `RknnModelOptions.OutputMode` 显式选择 `FloatOutputMode.PreferFastInt8`，允许合适的标准 INT8 head 使用快速转换，其他 head 仍由 SDK 转换；`Predict` 不受影响。该模式可能有浮点舍入差，不能保证 SDK 逐 bit 一致或任意阈值附近的检测决策相同；使用前应验证自己的模型与阈值。旧 native 继续支持默认模式，缺少可选配置导出时显式快速请求会报不支持。调用示例和精度限制见 [可选模式契约](https://github.com/sqk0232/RKNNSharp/blob/main/docs/api.md#显式可选的快速浮点转换)。
 
 ## NuGet 安装与本地打包
 
-当前包版本为 `0.2.0`，仅面向 **.NET 10** 应用；没有提供 .NET 6/8 资产。核心包包含 `RKNNSharp.dll`、XML 文档、MIT 许可证、本 README，以及 `runtimes/linux-arm64/native/librknnsharp_native.so`。包本身不包含 .NET 运行时、模型、厂商 RKNN/RGA 库、驱动或 GStreamer 采集 adapter。
+0.3.0 包仅面向 **.NET 10** 应用；没有提供 .NET 6/8 资产。核心包包含 `RKNNSharp.dll`、XML 文档、MIT 许可证、消费者专用 `NUGET_README.md`，以及 `runtimes/linux-arm64/native/librknnsharp_native.so`，依赖 Logging.Abstractions 10.0.0。包本身不包含 .NET 运行时、模型、厂商 RKNN/RGA 库、驱动或 GStreamer 采集 adapter。
 
 从 nuget.org 安装到自己的应用，再发布 Linux ARM64 输出：
 
 ```sh
-dotnet add path/to/YourApp.csproj package RKNNSharp --version 0.2.0
+dotnet add path/to/YourApp.csproj package RKNNSharp --version 0.3.0
 dotnet publish path/to/YourApp.csproj -c Release -r linux-arm64 --self-contained false
 ```
 
 上述应用路径需替换为自己的项目；选择依赖框架部署时，目标板必须已安装 .NET 10 运行时。SDK 会根据 `linux-arm64` 选择并复制包内原生资产，使用方无需自行复制本项目的桥接库，仍需配置外置厂商库的动态加载路径和设备权限。
 
-从源码本地打包时，先按硬件构建步骤生成并验证匹配的 Linux ARM64 原生桥接库，再在源码根目录执行：
+从源码本地打包时，默认使用仓库内受版本管理的已验收 Linux ARM64 自有桥接库，在源码根目录执行：
 
 ```sh
 dotnet pack src/RKNNSharp/RKNNSharp.csproj -c Release -o publish/nuget
 ```
 
-默认桥接库输入为 `publish/native/linux-arm64/librknnsharp_native.so`；不同输入位置可用 `-p:RKNNSharpNativeLibraryPath=/absolute/path/librknnsharp_native.so` 指定。缺少桥接库时打包会失败，不会生成缺少原生资产的包。消费本地包时，在安装命令末尾添加 `--source publish/nuget`，并确保该包源路径相对于执行目录有效。
+默认输入为 `native/prebuilt/linux-arm64/librknnsharp_native.so`，pack 校验其 SHA256 `fc31bf63de75a64d40b5432448475bacf2e1512c84aa194ca66bbc66f56c3f6a`；[来源记录](https://github.com/sqk0232/RKNNSharp/blob/main/native/prebuilt/linux-arm64/provenance.json)绑定 ABI 2、受测源码 hash 与环境。更新源码后须重新构建和验收，并一并更新预置资产、来源记录和预期 hash。自建桥接可用 `-p:RKNNSharpNativeLibraryPath=/absolute/path/librknnsharp_native.so` 指定，此 override 只检查文件存在，不要求匹配预置 hash，调用方负责来源及硬件验证。缺库或默认 hash 不符时打包失败。消费本地包时，在安装命令末尾添加 `--source publish/nuget`，并确保该包源路径相对于执行目录有效。
 
 原生包构建基线为 Linux ARM64、GCC 11.4、Ubuntu 22.04.5/glibc 2.35，硬件为 RK3588。桥接库直接符号要求为 GLIBC ≥2.33、GLIBCXX ≥3.4.21、CXXABI ≥1.3.9；这不等于整个厂商依赖链在这些最低版本上都已验证。已测组合使用 RKNN Runtime 2.3.2 / NPU driver 0.9.8、RGA 1.10.1_[3] / driver 1.3.7；这不是所有 Linux ARM64、其他 glibc/BSP、RK3588S 或 RKNN 版本均已验证的保证。桥接库不带构建机 RPATH/RUNPATH。发布前应使用实际 NuGet 消费项目在目标板验证加载、ABI 2 及有限推理，不把开发设备的绝对 SDK 路径打入包。
+
+## 官方 0.2.0 → 0.3.0 功能与兼容性
+
+| 项目 | 官方 0.2.0 | 0.3.0 |
+| --- | --- | --- |
+| 模型入口 | `RknnModel`，独立 profile | `RknnPipeline`、`RknnPipelineConfig`、新 `ModelType` |
+| 检测 | `Detect`、profile 解码 | `YoloV5Detection` / 指定 DFL 的 `YoloV8Detection`，统一 `Predict` / `Decode` |
+| 普通张量 | `Run` / `RunInto` | `RawTensor`，`PredictRaw` / `PredictRawInto` |
+| 内部热路径 | DFL float 解码，逐次源导入 | DFL INT8、profile 绑定缓存、NMS 原地排序、每 session 有界源 DMA 导入缓存 |
+| 平台/原生契约 | net10.0、Linux ARM64/RK3588、ABI 2 | 保留；分发匹配的已验桥接库 |
+| 托管依赖 | Logging.Abstractions 10.0.0 | 保留，默认空日志 |
+
+移除的五个公开类型及具体调用映射见[迁移指南](https://github.com/sqk0232/RKNNSharp/blob/main/docs/migration-0.3.md)。这是源码和二进制不兼容的托管 API 变化，需要重新编译；官方 0.2.0 没有 `ModelType`，不要把开发中间枚举名称当作版本迁移历史。
 
 ## 在目标板运行样例
 
@@ -103,7 +129,7 @@ read -r -p '来源色域 auto/601limit/601full/709limit: ' COLOR_SPACE
 "$PUBLISH_DIR/RKNNSharp.Smoke" "$MODEL_PATH" --single-frame --file "$VIDEO_PATH" h264 "$COLOR_SPACE"
 ```
 
-默认单帧走 YOLOv5 `Detect`。已确认模型符合 [DFL 九输出示例](https://github.com/sqk0232/RKNNSharp/blob/main/docs/yolo-detection.md) 时，在色域后追加 `dfl`，改为 `RunInto` 加 `YoloDetectionProfile`：
+默认单帧选择 `ModelType.YoloV5Detection`，调用统一的 `Predict`。已确认模型符合 [DFL 九输出示例](https://github.com/sqk0232/RKNNSharp/blob/main/docs/yolo-detection.md) 时，在色域后追加 `dfl`，选择 `ModelType.YoloV8Detection`，仍调用 `Predict`：
 
 ```sh
 "$PUBLISH_DIR/RKNNSharp.Smoke" "$MODEL_PATH" --single-frame --file "$VIDEO_PATH" h264 "$COLOR_SPACE" dfl
@@ -113,9 +139,26 @@ H.265 输入将 `h264` 改成 `h265`。`auto` 要求 caps 明确声明支持的�
 
 样例输出单帧 PTS、检测结果和阶段耗时，不保存或显示图像。完整参数、退出码、有限帧诊断及流水线入口见[样例说明](https://github.com/sqk0232/RKNNSharp/blob/main/samples/RKNNSharp.Smoke/README.md)；完整部署步骤见[整合说明](https://github.com/sqk0232/RKNNSharp/blob/main/docs/integration.md#从源码使用)。
 
+## 本轮优化前/后
+
+2026-11-10 在 RK3588 LubanCat-5 V2（Linux AArch64/kernel 6.1.84、RKNN Runtime 2.3.2 / driver 0.9.8、RGA 1.10.1_[3]、.NET 10.0.13）对比本轮优化前提交 `f4f60c00fe4030a4befbbeef228fac31a2eade2a` 与优化后的受测工作树。该基线与官方 0.2.0 tag 的提交不同，本节不作为 0.2.0 → 0.3.0 的版本性能表。
+
+两侧每模型各 3 个独立进程，每进程预热 100 次、计量 300 次，合计各 900 样本；固定 `taskset -c 4`、NPU Core0，复用同一已完成 MPP 解码的 NV12 帧。组合调用包含 RGA 预处理、NPU、输出获取/校验和检测后处理，**不含采集/解码等待**、模型加载、绘框或显示。DFL 基线为 `RunInto` + float 解码，本轮为统一入口的 INT8 `Predict`；这是组合路径比较，未隔离每个优化的独立收益。
+
+| 模型/计时项 | 优化前均值 ms | 优化后均值 ms | 均值变化 | 优化前/后 P95 ms |
+| --- | ---: | ---: | ---: | ---: |
+| 指定 YOLOv5s 组合调用 | 19.254 | 18.900 | -1.84% | 19.512 / 19.023 |
+| 指定 YOLOv8n DFL 组合调用 | 19.601 | 16.894 | -13.81% | 22.539 / 17.840 |
+| V5 NPU `rknn_run` | 17.058 | 17.056 | -0.01% | 17.127 / 17.089 |
+| DFL NPU `rknn_run` | 14.723 | 14.633 | -0.62% | 16.216 / 15.430 |
+
+NPU 时间基本不变，收益主要在预处理导入、输出和 CPU 后处理的组合路径；不宣传纯 NPU 加速或任意模型均有同样收益。模型 SHA256 分别为 V5 `5484cccbcc30292a167b2f9d7cf7cb06210decf4343e41f59e35c0ee41785f1e`、DFL `61d612e06215a23fe5ca64dc45f13b52dd46630457de459dc72dab31a60145b5`，均为下文记录的 640×640 模型。静态复用帧每次得到各自预期的 5 个目标，不构成标注集 mAP 或运动场景精度结论。
+
+优化前/后桥接库 SHA256 为 `fb6fb9f0f40323b49b6547f1464893698ce0e0a139c57ff98340df5f9bb76836` / `fc31bf63de75a64d40b5432448475bacf2e1512c84aa194ca66bbc66f56c3f6a`；受测托管 DLL SHA256 为 `3b106037c8a8abef057af63342cefc411352aeedd067094113ccf6dd893eaab1` / `6841dcc2ae25f57c543247bca8c39e7c0f9f23203b887f96eec4b76c9a5a8413`。这些 hash 标识本次实测对象，后续版本元数据重包会改变托管 DLL hash，不能称为所有包的通用成绩。NMS 单独分配量、长稳、实时 RTSP 重连、竞品比较未测。
+
 ## 测试数据
 
-下列为 **2026-10-29** 的历史性能测量，待 **0.2.0 板端同口径重测后更新**。耗时单位为 **ms**，表中保留三位小数；模型体积使用十进制 **1 MB = 1,000,000 字节**。不同模型、Runtime、版本和输入不能直接混作一次横向性能比较；吞吐的倒数不是单请求延迟。
+下列保留 **2026-10-29** 的历史性能测量，不代表 0.3.0 的最终包跑分。耗时单位为 **ms**，表中保留三位小数；模型体积使用十进制 **1 MB = 1,000,000 字节**。不同模型、Runtime、版本和输入不能直接混作一次横向性能比较；吞吐的倒数不是单请求延迟。
 
 ### 模型与输入
 
@@ -148,7 +191,7 @@ B 使用 RGB 文件身份 `f279bac6224e70fc19badd6d3fa4f44365d8fd5fe13e80b1865ed
 | B | 2.3.2；Core0 mask=1 | 每轮独立进程预热 10 次、测量 60 次；3 轮合计 180 |
 | C | 1.5.2；6 context masks=1/2/4/1/2/4，总在途 12 | 每会话预热 5 次，另开文件测量 600 帧；同进程 3 轮 |
 
-以上使用的是当时已测历史版本，当前代码之后有更新，本次未重新进行性能测试。B 的 P95 对合并 180 个原始样本使用 nearest-rank；C 逐轮分别列出，未平均分位数。A 的 P95 沿用当时 60 帧统计。
+以上使用的是当时已测历史版本，当前代码之后有更新，与上节本轮优化对照的输入和计时边界不同。B 的 P95 对合并 180 个原始样本使用 nearest-rank；C 逐轮分别列出，未平均分位数。A 的 P95 沿用当时 60 帧统计。
 
 ### A：YOLOv5s 真实流单会话耗时
 
@@ -201,7 +244,7 @@ confidence=0.25、NMS=0.45、单标签、最多 300 框，该版本默认使用 
 
 - `DmaFrame` 只借用 FD，不延长生产者生命周期；仅支持线性、单 FD、offset=0 的 NV12/RGB888/RGBA8888。NV12 必须明确色域。
 - 当前原生输入只接受静态 NHWC RGB INT8、zeroPoint=-128、scale=`float(1/255)`。YOLOv5 helper 要求三个标准 NCHW INT8 raw-logit head 和显式 anchors，不猜类别名称。
-- 硬件调用同步且中途不可取消；同一模型实例的推理与释放串行。`Run` 返回独立快照，`RunInto` 结果随调用方缓冲区下一次写入而改变。
+- 硬件调用同步且中途不可取消；同一模型实例的推理与释放串行。`PredictRaw` 返回独立快照，`PredictRawInto` 结果随调用方缓冲区下一次写入而改变。
 - `DllNotFoundException`：检查运行平台、两个自编译 `.so` 及其 `ldd` 依赖；`EntryPointNotFoundException`：检查托管库与原生 ABI 是否匹配。
 - 采集失败：检查 `gst-inspect-1.0 mppvideodec`、输入编码与线性 DMA 布局。色域拒绝时核实来源，不按分辨率猜测。
 - 模型契约拒绝：核对输入量化、布局、输出 head 和后处理配置，不以更改阈值绕过。

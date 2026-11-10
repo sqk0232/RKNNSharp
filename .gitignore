@@ -6,6 +6,7 @@
 *.rknn
 *.mp4
 *.so
+!/native/prebuilt/linux-arm64/librknnsharp_native.so
 *.so.*
 *.dll
 *.pdb
@@ -35,3 +36,4 @@
 artifacts/throughput-20261029/
 /artifacts/
 /publish/
+/graphify-out/
