@@ -138,10 +138,12 @@ public sealed class YoloV5Profile
     }
 
     internal IReadOnlyList<Detection> DecodeInt8(IReadOnlyList<TensorInfo> infos,
-        ReadOnlySpan<sbyte> head0, ReadOnlySpan<sbyte> head1, ReadOnlySpan<sbyte> head2, LetterboxTransform transform)
+        ReadOnlySpan<sbyte> head0, ReadOnlySpan<sbyte> head1, ReadOnlySpan<sbyte> head2, LetterboxTransform transform,
+        bool modelValidated = false)
     {
         transform.Validate();
-        ValidateOutputs(infos);
+        // RknnModel skips only structure checks after validating its immutable metadata under the session lock.
+        if (!modelValidated) { ValidateOutputs(infos); }
         var lookups = Volatile.Read(ref _int8Lookups);
         if (lookups is null || !lookups.Matches(infos))
         {

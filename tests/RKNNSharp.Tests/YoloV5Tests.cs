@@ -115,6 +115,11 @@ public sealed class YoloV5Tests
         var outputs = Heads().Select(output => output.Info).ToArray();
         var input = new TensorInfo(0, "images", [1, 640, 640, 3], 1228800, 1, 2, 2, -128, 1f / 255);
         profile.ValidateModel([input], outputs);
+        TensorInfo saved = outputs[0];
+        outputs[0] = outputs[1];
+        Assert.Throws<ArgumentException>(() => profile.ValidateModel([input], outputs));
+        outputs[0] = saved;
+        profile.ValidateModel([input], outputs);
         Assert.Throws<ArgumentException>(() => profile.ValidateModel([new(0, "wrong scale", [1, 640, 640, 3], 1228800, 1, 2, 2, -128, MathF.BitIncrement(1f / 255))], outputs));
         Assert.Throws<ArgumentException>(() => profile.ValidateModel([new(0, "wrong", [1, 3, 640, 640], 1228800, 0, 2, 2, -128, 1f / 255)], outputs));
         Assert.Throws<ArgumentException>(() => new YoloV5Profile(640, 640, 80, [[new(10, 13)]]));

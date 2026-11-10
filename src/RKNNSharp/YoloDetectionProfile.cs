@@ -178,6 +178,113 @@ public sealed class YoloDetectionProfile
         }
     }
 
+    // Addresses borrow standard, contiguous NCHW outputs only for this synchronous call.
+    // Match explicit affine dequantization followed by Decode, including float subtraction
+    // before Exp. SDK want_float rounding remains a separate Run/RunInto reference.
+    internal unsafe IReadOnlyList<Detection> DecodeInt8(IReadOnlyList<TensorInfo> infos,
+        ReadOnlySpan<nint> addresses, ReadOnlySpan<uint> counts, LetterboxTransform transform, bool modelValidated = false)
+    {
+        transform.Validate();
+        // RknnModel skips only structure checks after validating its immutable metadata under the session lock.
+        if (!modelValidated) { ValidateOutputs(infos); }
+        if (addresses.Length != infos.Count || counts.Length != infos.Count)
+        { throw new ArgumentException("INT8 buffer count must exactly match model outputs.", nameof(addresses)); }
+        for (int index = 0; index < infos.Count; index++)
+        {
+            TensorInfo info = infos[index];
+            if (addresses[index] == 0 || counts[index] != info.ElementCount || counts[index] > int.MaxValue)
+            { throw new ArgumentException($"Output {index} INT8 buffer length/pointer mismatch.", nameof(addresses)); }
+            // Finite positive scales normally make every possible INT8 value finite.
+            // For extreme scales check actual values, including unused box/score-sum tails.
+            if (!float.IsFinite((-128 - info.ZeroPoint) * info.Scale) ||
+                !float.IsFinite((127 - info.ZeroPoint) * info.Scale))
+            {
+                foreach (sbyte value in new ReadOnlySpan<sbyte>((void*)addresses[index], (int)counts[index]))
+                {
+                    if (!float.IsFinite((value - info.ZeroPoint) * info.Scale))
+                    { throw new ArgumentException($"Output {index} contains non-finite values.", nameof(addresses)); }
+                }
+            }
+        }
+
+        int largestPlane = Config.InputWidth / 8 * (Config.InputHeight / 8);
+        sbyte[] rentedScores = ArrayPool<sbyte>.Shared.Rent(largestPlane);
+        int[] rentedIds = ArrayPool<int>.Shared.Rent(largestPlane);
+        try
+        {
+            var candidates = new List<DetectionCandidate>();
+            Span<float> boxLookup = stackalloc float[256];
+            Span<float> classLookup = stackalloc float[256];
+            Span<float> gathered = stackalloc float[Config.RegMax];
+            foreach (YoloDetectionHead head in _headsByStride)
+            {
+                TensorInfo boxInfo = infos[head.BoxOutputIndex], classInfo = infos[head.ClassOutputIndex];
+                for (int value = -128; value <= 127; value++)
+                {
+                    boxLookup[value + 128] = (value - boxInfo.ZeroPoint) * boxInfo.Scale;
+                    classLookup[value + 128] = (value - classInfo.ZeroPoint) * classInfo.Scale;
+                }
+                int width = Config.InputWidth / head.Stride, height = Config.InputHeight / head.Stride;
+                int plane = width * height;
+                var boxes = new ReadOnlySpan<sbyte>((void*)addresses[head.BoxOutputIndex], (int)boxInfo.ElementCount);
+                var classes = new ReadOnlySpan<sbyte>((void*)addresses[head.ClassOutputIndex], (int)classInfo.ElementCount);
+                Span<sbyte> bestScores = rentedScores.AsSpan(0, plane);
+                Span<int> bestIds = rentedIds.AsSpan(0, plane);
+                classes[..plane].CopyTo(bestScores);
+                bestIds.Clear();
+                for (int classId = 1; classId < Config.ClassCount; classId++)
+                {
+                    ReadOnlySpan<sbyte> values = classes.Slice(classId * plane, plane);
+                    for (int cell = 0; cell < plane; cell++)
+                    {
+                        sbyte value = values[cell];
+                        // Positive affine scale is strictly ordered over finite INT8 results:
+                        // |value-zp| <= 255, including subnormal scales. Equal bytes keep the first class.
+                        if (value > bestScores[cell]) { bestScores[cell] = value; bestIds[cell] = classId; }
+                    }
+                }
+                for (int cell = 0; cell < plane; cell++)
+                {
+                    float bestScore = classLookup[bestScores[cell] + 128];
+                    if (bestScore < Config.ConfidenceThreshold) { continue; }
+                    float left = ExpectationInt8(boxes, boxLookup, gathered, cell, plane, 0);
+                    float top = ExpectationInt8(boxes, boxLookup, gathered, cell, plane, 1);
+                    float right = ExpectationInt8(boxes, boxLookup, gathered, cell, plane, 2);
+                    float bottom = ExpectationInt8(boxes, boxLookup, gathered, cell, plane, 3);
+                    float centerX = cell % width + .5f, centerY = cell / width + .5f;
+                    var box = new BoundingBox((centerX - left) * head.Stride, (centerY - top) * head.Stride,
+                        (centerX + right) * head.Stride, (centerY + bottom) * head.Stride);
+                    if (!box.IsValid) { continue; }
+                    if (!Config.MultiLabel) { candidates.Add(new(new(bestIds[cell], bestScore, box), candidates.Count)); }
+                    else
+                    {
+                        for (int classId = 0; classId < Config.ClassCount; classId++)
+                        {
+                            float score = classLookup[classes[classId * plane + cell] + 128];
+                            if (score >= Config.ConfidenceThreshold) { candidates.Add(new(new(classId, score, box), candidates.Count)); }
+                        }
+                    }
+                }
+            }
+            var selected = Suppress(candidates);
+            return Array.AsReadOnly(selected.Select(detection => detection with { Box = transform.Restore(detection.Box) })
+                .Where(detection => detection.Box.IsValid).ToArray());
+        }
+        finally
+        {
+            ArrayPool<sbyte>.Shared.Return(rentedScores);
+            ArrayPool<int>.Shared.Return(rentedIds);
+        }
+    }
+
+    private static float ExpectationInt8(ReadOnlySpan<sbyte> values, ReadOnlySpan<float> lookup,
+        Span<float> gathered, int cell, int plane, int side)
+    {
+        int start = side * gathered.Length * plane + cell;
+        for (int bin = 0; bin < gathered.Length; bin++) { gathered[bin] = lookup[values[start + bin * plane] + 128]; }
+        return Expectation(gathered);
+    }
+
     private float Expectation(ReadOnlySpan<float> values, int cell, int plane, int side)
     {
         int start = side * Config.RegMax * plane + cell;
@@ -185,10 +292,15 @@ public sealed class YoloDetectionProfile
         // 每个 bin 只做一次跨 plane 读取。MathF.Max 与 Exp 的顺序和原两次扫描相同。
         Span<float> gathered = stackalloc float[bins];
         for (int bin = 0; bin < bins; bin++) { gathered[bin] = values[start + bin * plane]; }
+        return Expectation(gathered);
+    }
+
+    private static float Expectation(ReadOnlySpan<float> gathered)
+    {
         float maximum = gathered[0];
-        for (int bin = 1; bin < bins; bin++) { maximum = MathF.Max(maximum, gathered[bin]); }
+        for (int bin = 1; bin < gathered.Length; bin++) { maximum = MathF.Max(maximum, gathered[bin]); }
         float sum = 0, weighted = 0;
-        for (int bin = 0; bin < bins; bin++)
+        for (int bin = 0; bin < gathered.Length; bin++)
         {
             float weight = MathF.Exp(gathered[bin] - maximum);
             sum += weight;
