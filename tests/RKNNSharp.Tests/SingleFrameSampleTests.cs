@@ -37,31 +37,31 @@ public sealed class SingleFrameSampleTests
     [Fact]
     public void DflExampleIsTheDocumentedNineOutputContract()
     {
-        YoloDetectionProfile profile = SingleFrameSample.CreateExplicitDfl640Example();
-        Assert.Equal(640, profile.Config.InputWidth);
-        Assert.Equal(640, profile.Config.InputHeight);
-        Assert.Equal(80, profile.Config.ClassCount);
-        Assert.Equal(16, profile.Config.RegMax);
-        Assert.Equal(0.25f, profile.Config.ConfidenceThreshold);
-        Assert.Equal(0.45f, profile.Config.NmsThreshold);
-        Assert.False(profile.Config.MultiLabel);
-        Assert.Equal(300, profile.Config.MaxDetections);
-        Assert.Equal(YoloDetectionOutputFormat.RknnDfl, profile.Config.OutputFormat);
-        Assert.Equal([8, 16, 32], profile.Config.Heads.Select(head => head.Stride));
-        Assert.Equal([0, 3, 6], profile.Config.Heads.Select(head => head.BoxOutputIndex));
-        Assert.Equal([1, 4, 7], profile.Config.Heads.Select(head => head.ClassOutputIndex));
-        Assert.Equal([2, 5, 8], profile.Config.Heads.Select(head => head.ScoreSumOutputIndex));
+        RknnPipelineConfig config = SingleFrameSample.CreateExplicitDfl640Example();
+        Assert.Equal(640, config.InputWidth);
+        Assert.Equal(640, config.InputHeight);
+        Assert.Equal(80, config.ClassCount);
+        Assert.Equal(16, config.RegMax);
+        Assert.Equal(0.25f, config.ConfidenceThreshold);
+        Assert.Equal(0.45f, config.NmsThreshold);
+        Assert.False(config.MultiLabel);
+        Assert.Equal(300, config.MaxDetections);
+        Assert.Equal(ModelType.YoloV8Detection, config.Contract);
+        Assert.Equal([8, 16, 32], config.Heads.Select(head => head.Stride));
+        Assert.Equal([0, 3, 6], config.Heads.Select(head => head.BoxOutputIndex));
+        Assert.Equal([1, 4, 7], config.Heads.Select(head => head.ClassOutputIndex));
+        Assert.Equal([2, 5, 8], config.Heads.Select(head => head.ScoreSumOutputIndex));
 
         var input = new TensorInfo(0, "images", [1, 640, 640, 3], 640u * 640 * 3, 1, 2, 2, -128, 1f / 255f);
         var outputs = new TensorInfo[9];
-        foreach (YoloDetectionHead head in profile.Config.Heads)
+        foreach (YoloDetectionHead head in config.Heads)
         {
-            uint grid = (uint)(profile.Config.InputWidth / head.Stride);
-            outputs[head.BoxOutputIndex] = Output(head.BoxOutputIndex, 4 * profile.Config.RegMax, grid);
-            outputs[head.ClassOutputIndex] = Output(head.ClassOutputIndex, profile.Config.ClassCount, grid);
+            uint grid = (uint)(config.InputWidth / head.Stride);
+            outputs[head.BoxOutputIndex] = Output(head.BoxOutputIndex, 4 * config.RegMax, grid);
+            outputs[head.ClassOutputIndex] = Output(head.ClassOutputIndex, config.ClassCount, grid);
             outputs[head.ScoreSumOutputIndex!.Value] = Output(head.ScoreSumOutputIndex.Value, 1, grid);
         }
-        profile.ValidateModel([input], outputs);
+        config.DflProfile!.ValidateModel([input], outputs);
     }
 
     private static TensorInfo Output(int index, int channels, uint grid) =>

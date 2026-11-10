@@ -297,6 +297,17 @@ public sealed class DflInt8Tests
         Assert.Throws<ArgumentException>(() => Decode(profile, infos, values, Transform));
     }
 
+    [Fact]
+    public void UnifiedPredictOverloadsReturnDetectionResults()
+    {
+        foreach (Type input in new[] { typeof(DmaFrame), typeof(DmaImage) })
+        {
+            var method = typeof(RknnPipeline).GetMethod("Predict", [input]);
+            Assert.NotNull(method);
+            Assert.Equal(typeof(DetectionResult), method.ReturnType);
+        }
+    }
+
     private static TensorInfo Requantize(TensorInfo info, int zeroPoint, float scale) => new(info.Index,
         info.Name, info.Dimensions, info.ElementCount, info.Layout, info.DataType, info.Quantization, zeroPoint, scale);
 

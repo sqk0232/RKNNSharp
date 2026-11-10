@@ -3,7 +3,7 @@ using System.Buffers;
 namespace RKNNSharp;
 
 /// <summary>显式的 Rockchip DFL 检测解码器. 类别 tensor 已是概率, 无 objectness 或二次 sigmoid.</summary>
-public sealed class YoloDetectionProfile
+internal sealed class YoloDetectionProfile
 {
     private readonly YoloDetectionHead[] _headsByStride;
     public YoloDetectionConfig Config { get; }

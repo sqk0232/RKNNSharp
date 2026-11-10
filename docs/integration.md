@@ -85,7 +85,7 @@ read -r -p '私有URL文件（绝对路径）: ' RTSP_URL_FILE
 
 ## 有界并发与性能复核
 
-采集示例的 `pipeline` 模式由单个 producer 取得帧，每个 worker 独占一个 `RknnModel` 和可写 DMA 目标。总在途许可覆盖排队、执行及等待按序消费的结果；`FrameId`、`SourceFrameId` 与 PTS 随原始输入传递，不能用完成次序或最新帧替代。退出时先停止入口、排空队列并等待同步硬件调用返回，再归还 sample 和关闭 capture。
+采集示例的 `pipeline` 模式由单个 producer 取得帧，每个 worker 独占一个 `RknnPipeline` 和可写 DMA 目标。总在途许可覆盖排队、执行及等待按序消费的结果；`FrameId`、`SourceFrameId` 与 PTS 随原始输入传递，不能用完成次序或最新帧替代。退出时先停止入口、排空队列并等待同步硬件调用返回，再归还 sample 和关闭 capture。
 
 默认配置是三个独立会话、总在途 6。`sessionsPerCore=2` 可选择六会话、总在途 12，核掩码依次为 1/2/4/1/2/4。可选 worker 数为 1/3/6，总容量必须在 worker 数至 24 之间。更多会话提高吞吐时，也可能增加同核排队和单请求延迟，不能把总 FPS 的倒数当作请求延迟。
 

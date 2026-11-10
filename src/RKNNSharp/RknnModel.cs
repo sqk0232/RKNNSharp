@@ -7,7 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace RKNNSharp;
 
 /// <summary>同步 RKNN 会话. 同一实例的 Run 和 Dispose 互斥; 不提供软件图像处理回退.</summary>
-public sealed class RknnModel : IDisposable
+internal sealed class RknnModel : IRknnSession
 {
     private readonly object _gate = new();
     // Metadata and profile configuration are immutable. Bound retention to one success per type.
@@ -24,23 +24,6 @@ public sealed class RknnModel : IDisposable
     public NpuCoreMask CoreMask { get; }
     /// <summary>请求的浮点输出模式. PreferFastInt8只对满足原生条件的head启用快速转换, 其他head仍由SDK转换.</summary>
     public FloatOutputMode OutputMode { get; }
-
-    /// <summary>从本地 RKNN 文件创建 Linux ARM64 会话, 验证原生 ABI/输入契约并显式配置 core policy.</summary>
-    /// <param name="modelPath">模型文件路径. 当前已验证模型见 docs/model-contract.md.</param>
-    /// <param name="coreMask">可选核心策略. Auto 为默认; 多核 mask 不保证缩短单次推理.</param>
-    public unsafe RknnModel(string modelPath, NpuCoreMask coreMask = NpuCoreMask.Auto)
-        : this(modelPath, coreMask, null, FloatOutputMode.SdkExact) { }
-
-    /// <summary>加载前可选校验模型主文件 SHA256. null 完全跳过hash读取; 校验仅发生在创建会话前.</summary>
-    /// <param name="modelPath">模型文件路径.</param>
-    /// <param name="coreMask">显式核心策略.</param>
-    /// <param name="expectedModelSha256">null 或64位十六进制摘要, 大小写均接受. 非签名或原子加载, 不证明anchors/精度.</param>
-    public unsafe RknnModel(string modelPath, NpuCoreMask coreMask, string? expectedModelSha256)
-        : this(modelPath, coreMask, expectedModelSha256, FloatOutputMode.SdkExact) { }
-
-    /// <summary>加载前可选校验模型SHA256, 并显式选择浮点输出模式. 显式快速模式需要支持配置导出的原生库.</summary>
-    public unsafe RknnModel(string modelPath, NpuCoreMask coreMask, string? expectedModelSha256, FloatOutputMode outputMode)
-        : this(modelPath, coreMask, expectedModelSha256, outputMode, null, null) { }
 
     /// <summary>使用可选调用线程调度与日志配置创建会话.</summary>
     public RknnModel(string modelPath, RknnModelOptions options)

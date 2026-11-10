@@ -1,7 +1,7 @@
 namespace RKNNSharp;
 
 /// <summary>显式的模型输出契约, 不根据 YOLO 型号或 tensor 名称猜测.</summary>
-public enum YoloDetectionOutputFormat
+internal enum YoloDetectionOutputFormat
 {
     /// <summary>三个 NCHW 分支: DFL box logits、类别概率、可选 score-sum. 不对类别概率重复 sigmoid.</summary>
     RknnDfl
@@ -11,7 +11,7 @@ public enum YoloDetectionOutputFormat
 public sealed record YoloDetectionHead(int BoxOutputIndex, int ClassOutputIndex, int? ScoreSumOutputIndex, int Stride);
 
 /// <summary>静态 batch1 RKNN YOLOv8/YOLO11 检测配置. 仅表达已明确的 DFL 输出格式, 不改变原生输入限制.</summary>
-public sealed class YoloDetectionConfig
+internal sealed class YoloDetectionConfig
 {
     public int InputWidth { get; }
     public int InputHeight { get; }

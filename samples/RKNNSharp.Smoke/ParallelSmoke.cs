@@ -273,15 +273,15 @@ internal static class ParallelSmoke
 
     private sealed class WorkerSession : IDisposable
     {
-        private readonly RknnModel _model;
-        private readonly YoloV5Profile _profile;
+        private readonly RknnPipeline _model;
+
         private DmaImage? _annotated;
         internal NpuCoreMask CoreMask => _model.CoreMask;
         internal int Processed { get; private set; }
         internal WorkerSession(string path, NpuCoreMask core, float confidence)
         {
-            _profile = YoloV5Profile.CreateOfficial640Example(confidence);
-            _model = new(path, core);
+
+            _model = new(ModelType.YoloV5Detection, path, ExampleConfigurations.V5(confidence), new RknnModelOptions { CoreMask = core });
         }
 
         internal FrameResult Process(NativeSampleLease lease, long? requestId = null, long? admittedAt = null) => lease.WithFrame(frame =>
@@ -290,7 +290,7 @@ internal static class ParallelSmoke
             long origin = admittedAt ?? lease.PulledAt;
             double queueMs = Stopwatch.GetElapsedTime(origin, start).TotalMilliseconds;
             _annotated ??= DmaImage.Allocate(frame.Width, frame.Height);
-            var detection = _model.Detect(frame, _profile);
+            var detection = _model.Predict(frame);
             long copy = Stopwatch.GetTimestamp();
             _annotated.CopyFrom(frame);
             double copyMs = Stopwatch.GetElapsedTime(copy).TotalMilliseconds;

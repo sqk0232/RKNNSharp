@@ -59,7 +59,7 @@ try
     {
         return await ParallelSmoke.RunReplayAsync(args[0], source, codec, rtsp, frames, warmup, colorSpace, confidence, configuration);
     }
-    var profile = YoloV5Profile.CreateOfficial640Example(confidence);
+    var config = ExampleConfigurations.V5(confidence);
     int baselineFds = CountFds();
     long baselineRss = Process.GetCurrentProcess().WorkingSet64;
     int count = 0, totalDetections = 0;
@@ -69,8 +69,8 @@ try
     for (int cycle = 0; cycle < cycles; cycle++)
     {
       {
-        using var model = new RknnModel(args[0], coreMask);
-        profile.ValidateModel(model.Inputs, model.Outputs);
+        using var model = new RknnPipeline(ModelType.YoloV5Detection, args[0], config, new RknnModelOptions { CoreMask = coreMask });
+
         Console.WriteLine(JsonSerializer.Serialize(new { kind = "model", versions = model.RuntimeVersions, model.CoreMask, inputs = model.Inputs, outputs = model.Outputs }));
         using var capture = new GStreamerCapture(source, codec, rtsp);
         DmaImage? annotated = null;
@@ -96,22 +96,22 @@ try
                     object? comparison = null;
                     if (mode == "run")
                     {
-                        raw = model.Run(frame);
+                        raw = model.PredictRaw(frame);
                         long postprocessStart = Stopwatch.GetTimestamp();
-                        detections = profile.Decode(raw.Outputs, raw.Transform);
+                        detections = model.Decode(raw).Detections;
                         decodeMs = Stopwatch.GetElapsedTime(postprocessStart).TotalMilliseconds;
                         timings = raw.Timings; transform = raw.Transform;
                     }
                     else
                     {
-                        var detected = model.Detect(frame, profile);
+                        var detected = model.Predict(frame);
                         detections = detected.Detections;
                         decodeMs = detected.PostprocessMs;
                         timings = detected.Timings; transform = detected.Transform;
                         if (mode == "compare")
                         {
-                            raw = model.Run(frame);
-                            var reference = profile.Decode(raw.Outputs, raw.Transform);
+                            raw = model.PredictRaw(frame);
+                            var reference = model.Decode(raw).Detections;
                             comparison = CompareDetections(reference, detections);
                         }
                     }
@@ -156,7 +156,7 @@ try
                 var operation = Task.Run(() =>
                 {
                     raceStart.SignalAndWait();
-                    try { model.Run(annotated); return "completed-before-dispose"; }
+                    try { model.PredictRaw(annotated); return "completed-before-dispose"; }
                     catch (ObjectDisposedException) { return "rejected-after-dispose"; }
                 });
                 raceStart.SignalAndWait();
@@ -164,7 +164,7 @@ try
                 string raceOutcome = await operation;
                 annotated.WithFrame(frame =>
                 {
-                    try { model.Run(frame); }
+                    try { model.PredictRaw(frame); }
                     catch (ObjectDisposedException) { return 0; }
                     throw new InvalidOperationException("Disposed model accepted a new operation.");
                 });

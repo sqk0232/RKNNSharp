@@ -3,7 +3,7 @@ namespace RKNNSharp;
 public readonly record struct YoloAnchor(float Width, float Height);
 
 /// <summary>显式的三头 NCHW INT8 YOLOv5 raw-logit 配置. 不自动猜测 anchors、类别名或概率输出.</summary>
-public sealed class YoloV5Profile
+internal sealed class YoloV5Profile
 {
     private readonly YoloAnchor[][] _anchors;
     private LookupSet? _int8Lookups;
